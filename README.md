@@ -88,9 +88,9 @@ Most AI memory systems work like this:
 
 ## Origin
 
-Silo was designed and built as the memory system for a production AI assistant managing 23 knowledge domains for a metal fabrication business in Brazil. It handles bilingual content (Portuguese/English), business operations, personal projects, technical systems, and hobby tracking — all with domain separation, confidence tracking, and full audit trails.
+Silo was designed by [Helder Santiago](https://github.com/Studioscale) as the memory system for a production AI assistant managing 23 knowledge domains for a metal fabrication business in Brazil. It handles bilingual content (Portuguese/English), business operations, personal projects, technical systems, and hobby tracking — all with domain separation, confidence tracking, and full audit trails.
 
-The architecture was designed by Claude (Opus, 1M context) through 4 rounds of review with 3 independent reviewers (78 issues found and resolved). The implementation runs on OpenClaw with GPT-4o for extraction and GPT-4o-mini for curation.
+The architecture was researched, directed, and decided by Helder. Engineering and documentation were done with Claude (Opus, 1M context). The design was stress-tested through 4 rounds of independent review with 3 reviewers (78 issues found and resolved). The implementation runs on OpenClaw with GPT-4o for extraction and GPT-4o-mini for curation.
 
 ## License
 
