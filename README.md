@@ -4,6 +4,28 @@ A structured memory architecture for AI assistants that actually works across se
 
 Silo replaces flat memory files (like OpenClaw's `MEMORY.md` or Claude Code's built-in memory) with a three-layer topic file system, a tagged event log, and automated extraction/curation pipelines. The result: your AI assistant remembers what matters, forgets what doesn't, and can tell you *when* and *why* something changed.
 
+> **Status (2026-04):** v12.5 in production on a single-user Hetzner VPS managing ~25 knowledge domains. 129 unit tests passing. Spec finalized after 57 audit rounds across 19 drafts (three independent reviewers per round — Claude, ChatGPT, Gemini). Implementation in [`src/`](src/), described in [IMPLEMENTATION.md](IMPLEMENTATION.md).
+
+```
+                Telegram / IDE / MCP client
+                          │ writes
+                          ▼
+               ┌──────────────────────────┐
+               │  operation log (Zone A)  │  ← single source of truth
+               │  /.silo/  JCS + SHA-256  │     (canonical, hash-chained)
+               └────────────┬─────────────┘
+                            │ regenerate
+                            ▼
+              ┌─────────────────────────────┐
+              │  topic files + event logs   │  ← Zone B projection
+              │  /memory-files/  markdown   │     (what AI agents read)
+              └─────────────────────────────┘
+                            │ index
+                            ▼
+                   BM25 + vector search
+                         (Zone C)
+```
+
 ## The problem
 
 Most AI memory systems work like this:
@@ -50,7 +72,7 @@ Most AI memory systems work like this:
 |--------|-----------|----------------|
 | Auto-load per session | ~5-8 KB (rules + index + today's events) | 10-50 KB (everything, always) |
 | Context relevance | High (load only the topic you need) | Low (entire memory loads every time) |
-| Curation cost | ~$2-6/month (GPT-4o extraction + GPT-4o-mini curation) | $0 (no curation = no cost = no quality) |
+| Curation cost | ~$5-10/month (GPT-5.4 extraction + GPT-5.4 curation, gpt-4o for high-volume) | $0 (no curation = no cost = no quality) |
 | Fact staleness tracking | Per-topic `last_verified` dates with type-specific thresholds | None |
 | Changelog | Every change recorded with old value, new value, date, reason | None (overwritten silently) |
 | Confidence levels | CONFIRMED / TENTATIVE / CONTEXT | None |
@@ -88,9 +110,11 @@ Most AI memory systems work like this:
 
 ## Origin
 
-Silo was designed by [Helder Santiago](https://github.com/Studioscale) as the memory system for a production AI assistant managing 23 knowledge domains for a metal fabrication business in Brazil. It handles bilingual content (Portuguese/English), business operations, personal projects, technical systems, and hobby tracking — all with domain separation, confidence tracking, and full audit trails.
+Silo was designed by [Helder Santiago](https://github.com/Studioscale) as the memory system for a production AI assistant managing 25 knowledge domains for a metal fabrication business in Brazil. It handles bilingual content (Portuguese/English), business operations, personal projects, technical systems, and hobby tracking — all with domain separation, confidence tracking, and full audit trails.
 
-The architecture was researched, directed, and decided by Helder. Engineering and documentation were done with Claude (Opus, 1M context). The design was stress-tested through 4 rounds of independent review with 3 reviewers (78 issues found and resolved). The implementation runs on OpenClaw with GPT-4o for extraction and GPT-4o-mini for curation.
+The architecture was researched, directed, and decided by Helder. Engineering and documentation were done with Claude (Opus, 1M context). The v12.5 spec was stress-tested through 57 audit rounds across 19 drafts, with three independent reviewers each round (Claude, ChatGPT, Gemini). The implementation runs on OpenClaw with GPT-5.4 for extraction and curation. Production cutover happened 2026-04-22; the system has been the live memory authority since.
+
+For the journey from v3.x (script-based, files-as-truth) to v12.5 (operation-log + projections), see [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
 ## License
 

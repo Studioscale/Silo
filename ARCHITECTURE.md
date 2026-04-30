@@ -51,6 +51,75 @@ the assistant suggesting a relevant topic file to load.
 
 ---
 
+## 1a. v12.5 — Operation Log + Projections
+
+The original Silo design (described throughout the rest of this document) treated topic files as the source of truth: scripts wrote to topic files directly; curation reorganized them in place; the file system *was* the memory.
+
+The v12.5 implementation in [`src/`](src/) inverts that: a **canonical operation log** is the source of truth, and topic files / event logs are **regenerated projections** of the log.
+
+### Three zones
+
+| Zone | What lives here | Owned by |
+|------|-----------------|----------|
+| **A — Authority** | The operation log (`/.silo/`). Append-only sequence of events, JCS-canonicalized + SHA-256 hash-chained. | Silo (CLI / MCP bridge writers) |
+| **B — Projections** | Topic files, event log files, topic index. Regenerated from Zone A by `silo regenerate`. | Silo (regenerator) |
+| **C — Index / Cache** | BM25 search index, vector embedding index. Built from Zone B. | Memory search engine (e.g., OpenClaw's) |
+
+Reads can hit any zone. Writes only ever land in Zone A. Anything Zone B or Zone C says is derived — if you don't trust it, you regenerate from the log.
+
+### Write path (post-v12.5)
+
+```
+client (Claude / agent / cron / extraction pipeline)
+   │
+   │  write_event(slug, tag, content, principal, ...)
+   ▼
+admission gate (Event Capability Matrix — § 4 below)
+   │
+   │  if (socket, mode) cell admits this event type:
+   ▼
+log append: { seq, type, payload, hash_prev, hash_self, ts }
+   │
+   │  fsync, in-process mutex
+   ▼
+state: interpret(log) → topic_index, ACL table, etc.
+   │
+   ▼
+regenerate Zone B files (atomic write per file)
+```
+
+### What this changes vs. the v3.x design
+
+- **Replayability.** Any historical state is reachable via `interpret(log, asOfSeq=N)`. The file system at any past moment can be reconstructed exactly.
+- **Byte-perfect regeneration.** A topic file regenerated from the log matches the original byte-for-byte (the v12.5 production migration measured 22/23 topics + 20/21 event logs as exact matches; the two diffs were one YAML field position and one trailing newline).
+- **Single audit trail.** Every change is an event with a sequence number, hash, and intent_id. There's no parallel "who edited the file" question — the log is the answer.
+- **No partial state.** Atomic file regeneration means readers never see half-written topic files. (Even at the point of a crash, the log is the truth; on restart, regenerate.)
+
+### What this does NOT change
+
+The conceptual layers (1/2/3 in topic files), the event log format, the search hierarchy, the extraction and curation pipelines, the design principles — all of those carry over from earlier specs. The change is **where the truth lives**, not **what the truth looks like**.
+
+So sections 2 through 12 below describe the *file-shape* that's identical in both designs. The implementation just produces that file-shape from a log instead of from in-place edits.
+
+### Event types (selected)
+
+The v12.5 Event Capability Matrix is in [`src/matrix/matrix.yaml`](src/matrix/matrix.yaml). Examples of state-bearing events:
+
+| Type | Effect |
+|------|--------|
+| `write_event` | Append to topic; payload carries `slug`, `tag`, `content`, optional `confidence` |
+| `TOPIC_METADATA_SET` | Set/update topic header (type, tags, entities, status, summary) |
+| `TOPIC_VERIFIED` | Mark topic as verified at this timestamp |
+| `TOPIC_CURATED` | Mark topic as curated at this timestamp |
+| `ACL_SEALED` | Set the reader set for a topic (admin-only) |
+| `PRINCIPAL_DECLARED` / `_UID_BOUND` / `_ACCESS_ENABLED` | Identity events |
+| `FEATURE_ACTIVE` / `_ROLLED_BACK` | Feature flag plane |
+| `RECOVERY_MODE_ENTERED` / `_EXITED` | Mode plane |
+
+Each event type has a (socket, mode) admission cell in the matrix. The interpret layer is a deterministic, total function over the log — same bytes always produce the same state.
+
+---
+
 ## 2. Topic Files — The Three Layers
 
 Every topic file has three physically separated sections.

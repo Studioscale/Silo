@@ -1,0 +1,23 @@
+{
+  "name": "silo",
+  "version": "0.1.0-m1",
+  "description": "Silo Adaptive Tier System — append-only file-based memory for AI assistants (v12.5 spec)",
+  "type": "module",
+  "bin": {
+    "silo": "./bin/silo"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:watch": "node --test --watch test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "canonicalize": "^2.0.0",
+    "js-yaml": "^4.1.0",
+    "minisearch": "^7.1.0",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {}
+}

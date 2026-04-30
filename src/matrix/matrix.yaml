@@ -1,0 +1,447 @@
+# Event Capability Matrix — v12.5 §4.7
+#
+# Normative ground-truth for event admission. Broker uses this as the single
+# admission oracle. The spec's markdown matrix in §4.7 is REGENERATED from
+# this file; this file wins on conflict.
+#
+# Scope: client-facing sockets only (standard + admin).
+# Broker-internal events (BROKER_STARTED, CHECKPOINT_FALLBACK) are NOT in this matrix.
+#
+# Columns = broker modes: standard | admin | install_freeze | read_only | recovery
+# Values  = Y (admissible) | N (rejected)
+#
+# is_state_bearing = registry-authoritative per v12.5 §3.8.
+# Client-supplied envelope flag is ignored for known types (broker uses the value
+# declared here). Unknown types require prior REGISTER_EVENT_TYPE or are rejected.
+
+schema_version: "v12.5.0"
+
+events:
+  # ── Topic writes + observations (standard-admissible) ────────────────────────
+  write_event:
+    is_state_bearing: true
+    family: topic
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  observation_read:
+    is_state_bearing: true
+    family: observation
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  observation_write:
+    is_state_bearing: true
+    family: observation
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  # ── Publication / retirement (standard-admissible, state-bearing) ────────────
+  MEMORY_PROMOTED:
+    is_state_bearing: true
+    family: memory
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  MEMORY_RETIRED:
+    is_state_bearing: true
+    family: memory
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  PROCEDURE_PUBLISHED:
+    is_state_bearing: true
+    family: procedure
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  PROCEDURE_RETIRED:
+    is_state_bearing: true
+    family: procedure
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  COHORT_SPLIT:
+    is_state_bearing: true
+    family: cohort
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  # TOPIC_VERIFIED: operator/auto-verifier stamps a topic as freshly verified
+  # against source. Projection regenerator uses the latest TOPIC_VERIFIED.ts
+  # for the `last_verified` YAML field (Jarvis review #5).
+  TOPIC_VERIFIED:
+    is_state_bearing: true
+    family: topic
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  # TOPIC_CURATED: operator/curation pipeline stamps a topic as freshly curated.
+  # Projection regenerator uses the latest TOPIC_CURATED.ts for `last_curated`.
+  TOPIC_CURATED:
+    is_state_bearing: true
+    family: topic
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  # TOPIC_METADATA_SET: sets topic-level YAML metadata (type, tags, entities,
+  # status, sensitivity, created). Latest-wins semantics; regenerator merges.
+  # Decoupled from write_event because this is authorial intent about the
+  # TOPIC itself, not content written INTO the topic.
+  TOPIC_METADATA_SET:
+    is_state_bearing: true
+    family: topic
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  # ── ACL (admin-only per v12.5 fix 8) ─────────────────────────────────────────
+  ACL_SEALED:
+    is_state_bearing: true
+    family: acl
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  # ── Identity event family (admin only; install-freeze allowed) ───────────────
+  PRINCIPAL_DECLARED:
+    is_state_bearing: true
+    family: identity
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  PRINCIPAL_RENAME:
+    is_state_bearing: true
+    family: identity
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  PRINCIPAL_TOMBSTONE:
+    is_state_bearing: true
+    family: identity
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  PRINCIPAL_UID_BOUND:
+    is_state_bearing: true
+    family: identity
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  PRINCIPAL_UID_UNBOUND:
+    is_state_bearing: true
+    family: identity
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  PRINCIPAL_KEY_BOUND:
+    is_state_bearing: true
+    family: identity
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  PRINCIPAL_KEY_UNBOUND:
+    is_state_bearing: true
+    family: identity
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  PRINCIPAL_ACCESS_ENABLED:
+    is_state_bearing: true
+    family: identity
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  PRINCIPAL_ACCESS_DISABLED:
+    is_state_bearing: true
+    family: identity
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  # ── Install transaction (admin only, install-freeze permits itself) ──────────
+  INSTALL_STARTED:
+    is_state_bearing: true
+    family: install
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: N
+
+  INSTALL_STEP_COMPLETED:
+    is_state_bearing: true
+    family: install
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: N
+
+  INSTALL_STEP_HEARTBEAT:
+    is_state_bearing: false
+    family: install
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: N
+
+  INSTALL_STEP_FORCE_RESUME:
+    is_state_bearing: true
+    family: install
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: N
+
+  INSTALL_COMPLETED:
+    is_state_bearing: true
+    family: install
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: N
+
+  INSTALL_ABORTED:
+    is_state_bearing: true
+    family: install
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: N
+
+  INSTALL_TIMEOUT:
+    is_state_bearing: true
+    family: install
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: N
+
+  INSTALL_ROLLED_BACK:
+    is_state_bearing: true
+    family: install
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: N
+
+  # ── Features / tag schema / recovery (admin only) ────────────────────────────
+  FEATURE_PROPOSED:
+    is_state_bearing: true
+    family: feature
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  FEATURE_ACTIVE:
+    is_state_bearing: true
+    family: feature
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  FEATURE_ROLLED_BACK:
+    is_state_bearing: true
+    family: feature
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  FEATURE_INSTALL_FAILED:
+    is_state_bearing: true
+    family: feature
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  TAG_SCHEMA_PROPOSED:
+    is_state_bearing: true
+    family: tag
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: N
+
+  TAG_SCHEMA_ACTIVE:
+    is_state_bearing: true
+    family: tag
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: N
+
+  RECOVERY_MODE_ENTERED:
+    is_state_bearing: true
+    family: recovery
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: N
+      read_only: Y   # exactly where it's needed
+      recovery: N
+
+  RECOVERY_MODE_EXITED:
+    is_state_bearing: true
+    family: recovery
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: Y
+
+  # RECOVERY_ACCEPTED / RECOVERY_REPUDIATED are admissible ONLY during recovery mode.
+  # Per v12 §3.7 prose: "This is the only broker mode in which these are admissible."
+  # admin:N in normal mode enforces that.
+  RECOVERY_ACCEPTED:
+    is_state_bearing: true
+    family: recovery
+    admission:
+      standard: N
+      admin: N
+      install_freeze: N
+      read_only: N
+      recovery: Y
+
+  RECOVERY_REPUDIATED:
+    is_state_bearing: true
+    family: recovery
+    admission:
+      standard: N
+      admin: N
+      install_freeze: N
+      read_only: N
+      recovery: Y
+
+  BROKER_KEY_ROTATED:
+    is_state_bearing: true
+    family: broker
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
+
+  # ── Forward-compat meta-event (registry operates on itself) ──────────────────
+  REGISTER_EVENT_TYPE:
+    is_state_bearing: true
+    family: broker
+    admission:
+      standard: N
+      admin: Y
+      install_freeze: Y
+      read_only: N
+      recovery: Y
