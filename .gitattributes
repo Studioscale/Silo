@@ -1,0 +1,9 @@
+# Force LF line endings for text files — Windows clones don't get CRLF'd.
+# Avoids spurious diffs and serialization mismatches in the canonical hash chain.
+* text=auto eol=lf
+
+# Binary stays binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary

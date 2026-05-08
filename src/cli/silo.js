@@ -2,11 +2,15 @@
 /**
  * silo CLI — v12.5 M1.
  *
- * Commands:
- *   silo init [--silo-dir=.silo] [--operator=<name>] [--uid=<n>]
- *     Initialize a fresh silo: creates .silo/, emits identity events for operator.
+ * Environment variables (override defaults so flags are optional):
+ *   SILO_DIR        Default for --silo-dir       (otherwise: .silo in cwd)
+ *   SILO_PRINCIPAL  Default for --principal      (otherwise: operator)
  *
- *   silo status [--silo-dir=.silo]
+ * Commands:
+ *   silo init [--silo-dir=...] [--operator=<name>] [--uid=<n>]
+ *     Initialize a fresh silo: creates the data dir, emits identity events.
+ *
+ *   silo status [--silo-dir=...]
  *     Show broker state summary (tier, principals, topic count, tail).
  *
  *   silo write --slug=<s> --tag=<t> --content="..." [--principal=<p>] [--silo-dir=...]
@@ -15,11 +19,11 @@
  *   silo read --slug=<s> [--silo-dir=...]
  *     Print topic history.
  *
- *   silo search <query> [--mode=exact|context] [--flags=...] [--principal=<p>] [--silo-dir=...]
+ *   silo search <query> [--mode=exact|context|orient] [--flags=...] [--principal=<p>] [--silo-dir=...]
  *     Retrieve matching topics.
  *
  *   silo import-jarvis --from <path> [--silo-dir=...]
- *     Import existing Jarvis memory (topic files + event log) as v12.5 events.
+ *     Import existing memory (topic files + event log) as v12.5 events.
  */
 
 import { parseArgs } from 'node:util';
@@ -38,9 +42,15 @@ import { distill } from '../distill/distill.js';
 import { tokenize } from '../distill/tokenize.js';
 import { OpenAIClient } from '../distill/openai-client.js';
 
+// Defaults can be overridden by env vars (standard CLI pattern: KUBECONFIG,
+// AWS_PROFILE, EDITOR, etc.) so users don't have to pass --silo-dir and
+// --principal on every invocation. Set them once in your shell:
+//   export SILO_DIR=/path/to/your/silo-memory
+//   export SILO_PRINCIPAL=alice
+// Or on Windows: set them as persistent user env vars via System Properties.
 const GLOBAL_OPTIONS = {
-  'silo-dir': { type: 'string', default: '.silo' },
-  principal: { type: 'string', default: 'helder' }, // M1 default; M2 resolves via UID binding
+  'silo-dir': { type: 'string', default: process.env.SILO_DIR || '.silo' },
+  principal: { type: 'string', default: process.env.SILO_PRINCIPAL || 'operator' },
 };
 
 async function openWriter(siloDir) {
