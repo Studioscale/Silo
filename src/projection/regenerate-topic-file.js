@@ -51,6 +51,7 @@ async function collectSlugEvents(logReader, slug) {
       (e.type === 'write_event' && e.payload?.slug === slug) ||
       (e.type === 'TOPIC_VERIFIED' && e.payload?.topic === slug) ||
       (e.type === 'TOPIC_CURATED' && e.payload?.topic === slug) ||
+      (e.type === 'TOPIC_BULLETS_RETIRED' && e.payload?.topic === slug) ||
       (e.type === 'TOPIC_METADATA_SET' && e.payload?.topic === slug) ||
       (e.type === 'ACL_SEALED' && e.payload?.topic === slug)
     ) {
@@ -134,10 +135,12 @@ function buildFrontmatter({ slug, events, state }) {
  * Does NOT wrap bare content in a synthetic "## Curated" heading — that was a
  * regenerator bug caught during parity check with Helder's real corpus.
  */
-function buildLayer2(events) {
+function buildLayer2(events, retiredSeqs = new Set()) {
   const curatedEvents = events.filter((e) => {
     if (e.type !== 'write_event') return false;
     if (e.payload?.tag !== 'CURATED') return false;
+    // Phase 2: skip seqs retired by TOPIC_BULLETS_RETIRED.
+    if (retiredSeqs.has(e.seq)) return false;
     // Exclude event-log-origin writes (they carry imported.source_line but no
     // imported.field). Only topic-file imports (imported.field === 'curated')
     // and native writes (no imported hint) belong in Layer 2.
@@ -325,7 +328,7 @@ export async function regenerateTopicFile({ slug, logReader, state }) {
   }
 
   const frontmatter = buildFrontmatter({ slug, events, state });
-  const layer2 = buildLayer2(events);
+  const layer2 = buildLayer2(events, state.retired_curated_seqs);
   const layer3 = buildLayer3(events);
 
   const mechanical = computeMechanicalFields(layer2, layer3);

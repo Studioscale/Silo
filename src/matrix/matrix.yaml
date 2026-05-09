@@ -124,6 +124,21 @@ events:
       read_only: N
       recovery: N
 
+  # TOPIC_BULLETS_RETIRED: curation pipeline retires Layer 2 (CURATED) bullets
+  # by seq when recent events contradict or invalidate them. Phase 2 of the
+  # dreaming-inspired upgrade. Payload: { topic, superseded_seqs: [int...],
+  # reason?: string }. interpret() folds superseded_seqs into
+  # state.retired_curated_seqs; projection's buildLayer2 skips retired seqs.
+  TOPIC_BULLETS_RETIRED:
+    is_state_bearing: true
+    family: topic
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
   # TOPIC_METADATA_SET: sets topic-level YAML metadata (type, tags, entities,
   # status, sensitivity, created). Latest-wins semantics; regenerator merges.
   # Decoupled from write_event because this is authorial intent about the

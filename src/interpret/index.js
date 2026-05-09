@@ -183,6 +183,26 @@ function applyEntry(state, entry) {
       break;
     }
 
+    case 'TOPIC_BULLETS_RETIRED': {
+      // Phase 2 of dreaming-inspired upgrade: curation pipeline can supersede
+      // Layer 2 bullets by seq. Defensive parse — malformed payload silently
+      // skipped so interpret() stays total. Cross-topic protection: only
+      // accept seqs that reference a CURATED write_event on THIS topic.
+      const payload = entry.payload || {};
+      const { topic, superseded_seqs } = payload;
+      if (!topic || !Array.isArray(superseded_seqs)) break;
+      const history = state.topic_content.get(topic) || [];
+      const validSeqs = new Set(
+        history.filter((h) => h.tag === 'CURATED').map((h) => h.seq),
+      );
+      for (const s of superseded_seqs) {
+        if (typeof s === 'number' && Number.isFinite(s) && s > 0 && validSeqs.has(s)) {
+          state.retired_curated_seqs.add(s);
+        }
+      }
+      break;
+    }
+
     case 'TOPIC_METADATA_SET': {
       const { topic, type, tags, entities, status, sensitivity, created, summary, summary_trailing_blank } = entry.payload;
       if (!topic) break;

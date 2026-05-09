@@ -86,3 +86,22 @@ test('matrix: listTypes returns all registered events (sanity check)', () => {
   assert.ok(types.includes('PRINCIPAL_DECLARED'));
   assert.ok(types.includes('REGISTER_EVENT_TYPE'));
 });
+
+test('matrix: TOPIC_BULLETS_RETIRED is known, state-bearing, topic family', () => {
+  // Phase 2 of dreaming-inspired upgrade: curation pipeline retires Layer 2
+  // bullets that recent events have invalidated.
+  const m = loadMatrix();
+  assert.equal(m.isKnown('TOPIC_BULLETS_RETIRED'), true);
+  assert.equal(m.isStateBearing('TOPIC_BULLETS_RETIRED'), true);
+  assert.equal(m.family('TOPIC_BULLETS_RETIRED'), 'topic');
+});
+
+test('matrix admission: TOPIC_BULLETS_RETIRED admissible on standard in normal mode', () => {
+  // Mirrors TOPIC_VERIFIED / TOPIC_CURATED admission (curate runs as
+  // standard principal). Rejected in frozen modes like other topic events.
+  const m = loadMatrix();
+  assert.equal(m.isAdmissible('TOPIC_BULLETS_RETIRED', 'standard', 'normal'), true);
+  assert.equal(m.isAdmissible('TOPIC_BULLETS_RETIRED', 'admin', 'normal'), true);
+  assert.equal(m.isAdmissible('TOPIC_BULLETS_RETIRED', 'standard', 'install_freeze'), false);
+  assert.equal(m.isAdmissible('TOPIC_BULLETS_RETIRED', 'standard', 'read_only'), false);
+});

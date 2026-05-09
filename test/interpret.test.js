@@ -211,6 +211,98 @@ test('interpret: with matrix, enforces registry-authoritative is_state_bearing',
   assert.equal(state.topic_index.size, 1);
 });
 
+test('interpret: TOPIC_BULLETS_RETIRED populates retired_curated_seqs', async () => {
+  // Phase 2: curate-emitted retirement events fold into a per-state set,
+  // gated by topic-scoping (a retire event only retires CURATED writes
+  // on its own topic) and by validity (the seq must reference a CURATED
+  // write in topic_content).
+  const { writer } = await freshSilo();
+  await writer.append({
+    type: 'PRINCIPAL_DECLARED',
+    isStateBearing: true,
+    intentId: 'intent:p1',
+    principal: 'operator',
+    payload: { principal: 'helder', class: 'human' },
+    ts: '2026-04-22T10:00:00Z',
+  });
+  await writer.append({
+    type: 'PRINCIPAL_ACCESS_ENABLED',
+    isStateBearing: true,
+    intentId: 'intent:p2',
+    principal: 'operator',
+    payload: { principal: 'helder' },
+    ts: '2026-04-22T10:00:01Z',
+  });
+  // Two CURATED writes on topic-A
+  await writer.append({
+    type: 'write_event',
+    isStateBearing: true,
+    intentId: 'intent:cA1',
+    principal: 'curator',
+    payload: { slug: 'topic-a', tag: 'CURATED', content: '- old port 8080' },
+    ts: '2026-04-22T10:01:00Z',
+  });
+  await writer.append({
+    type: 'write_event',
+    isStateBearing: true,
+    intentId: 'intent:cA2',
+    principal: 'curator',
+    payload: { slug: 'topic-a', tag: 'CURATED', content: '- still valid' },
+    ts: '2026-04-22T10:01:01Z',
+  });
+  // One CURATED write on topic-B (must NOT be retired by topic-A's retire event)
+  await writer.append({
+    type: 'write_event',
+    isStateBearing: true,
+    intentId: 'intent:cB1',
+    principal: 'curator',
+    payload: { slug: 'topic-b', tag: 'CURATED', content: '- topic-b bullet' },
+    ts: '2026-04-22T10:01:02Z',
+  });
+  // Retire topic-A bullet (seq 3) — and also try to smuggle topic-B's seq 5
+  await writer.append({
+    type: 'TOPIC_BULLETS_RETIRED',
+    isStateBearing: true,
+    intentId: 'intent:r1',
+    principal: 'curator',
+    payload: {
+      topic: 'topic-a',
+      superseded_seqs: [3, 5], // 5 belongs to topic-b — should be rejected
+      reason: 'port changed to 9090',
+    },
+    ts: '2026-04-22T10:02:00Z',
+  });
+
+  const state = await interpret(writer);
+  // seq 3 retired; seq 5 NOT retired (cross-topic protection)
+  assert.ok(state.retired_curated_seqs.has(3));
+  assert.ok(!state.retired_curated_seqs.has(5));
+  assert.equal(state.retired_curated_seqs.size, 1);
+});
+
+test('interpret: TOPIC_BULLETS_RETIRED with malformed payload does not throw', async () => {
+  // Totality invariant: malformed retire payloads silently skip the bad seqs.
+  const { writer } = await freshSilo();
+  await writer.append({
+    type: 'PRINCIPAL_DECLARED',
+    isStateBearing: true,
+    intentId: 'intent:p1',
+    principal: 'operator',
+    payload: { principal: 'helder', class: 'human' },
+    ts: '2026-04-22T10:00:00Z',
+  });
+  await writer.append({
+    type: 'TOPIC_BULLETS_RETIRED',
+    isStateBearing: true,
+    intentId: 'intent:r-bad',
+    principal: 'curator',
+    payload: { topic: 'nonexistent', superseded_seqs: ['not-a-number', -1, null, 0, 9999] },
+    ts: '2026-04-22T10:01:00Z',
+  });
+  const state = await interpret(writer);
+  assert.equal(state.retired_curated_seqs.size, 0);
+});
+
 test('interpret: is total — malformed entry does not throw, surfaces in skipped[]', async () => {
   // Craft a log with a valid entry followed by a malformed line
   const dir = await fs.mkdtemp(join(tmpdir(), 'silo-mal-'));

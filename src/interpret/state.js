@@ -23,6 +23,7 @@ export function newState() {
     topic_index: new Map(), // slug -> { slug, last_updated_seq, tags: Set, hash }
     dedup_witness_set: new Map(), // intent_id -> { seq, principal, op, payload_hash }
     topic_content: new Map(), // slug -> array of event summaries (for M1 simple reads)
+    retired_curated_seqs: new Set(), // seq numbers of CURATED write_events superseded by TOPIC_BULLETS_RETIRED
     last_seq: 0,
     tail_hash: null,
     skipped: [], // [{ seq, reason }]
@@ -51,6 +52,7 @@ export function stateToJson(state) {
       ]),
     ),
     dedup_witness_size: state.dedup_witness_set.size,
+    retired_curated_seqs: [...state.retired_curated_seqs].sort((a, b) => a - b),
     last_seq: state.last_seq,
     tail_hash: state.tail_hash,
     skipped: state.skipped,

@@ -447,11 +447,18 @@ async function cmdCurate({
       continue;
     }
 
-    // Existing Layer 2 content (curated bullets only — what topic-import or prior curate emitted)
-    const curatedEventList = history.filter((h) => h.tag === 'CURATED');
+    // Existing Layer 2 content. Two views:
+    //   - ALL list: every CURATED write_event (incl. retired) — used for verbatim
+    //     dedup so the LLM cannot re-introduce a bullet that was just retired.
+    //   - ACTIVE list: non-retired only — used for the prompt + verification.
+    const curatedEventListAll = history.filter((h) => h.tag === 'CURATED');
+    const curatedEventList = curatedEventListAll.filter(
+      (h) => !state.retired_curated_seqs.has(h.seq),
+    );
+    const existingCuratedAll = curatedEventListAll.map((h) => h.content).join('\n\n');
     const existingCurated = curatedEventList.map((h) => h.content).join('\n\n');
 
-    // Verification backfill: if any existing curated bullet has clear topical
+    // Verification backfill: if any active curated bullet has clear topical
     // overlap with a recent event, the bullet is "still supported" — advance
     // last_verified_seq automatically. Threshold is looser than dedup (0.8)
     // because we're checking topical match, not duplication.
@@ -475,9 +482,16 @@ async function cmdCurate({
       .map((h) => `[${h.ts.slice(0, 10)}] [${h.tag || 'EVENT'}] ${h.content}`)
       .join('\n');
 
-    const systemPrompt = `You are a memory curator for the Silo memory system. Given a topic's recent event log and its current Layer 2 (curated) content, decide what NEW curated bullets should be added.
+    // Number active bullets so the LLM can refer to them by index for retirement.
+    const numberedBullets = curatedEventList
+      .map((h, i) => `[${i + 1}] ${h.content}`)
+      .join('\n');
 
-INCLUDE:
+    const systemPrompt = `You are a memory curator for the Silo memory system. Given a topic's recent event log and its current Layer 2 (curated) bullets, decide:
+1. Which existing bullets (if any) are CONTRADICTED or INVALIDATED by recent events and should be RETIRED.
+2. What NEW curated bullets should be added.
+
+INCLUDE (for new bullets):
 - Architecture / deployment / infrastructure decisions
 - Algorithm choices and their constraints
 - Security fixes — specifics: which vulnerability, which surface (NOT "security audit X→Y")
@@ -492,32 +506,39 @@ EXCLUDE:
 - Status updates already reflected in actions
 - Restating existing curated content
 
+RETIRE only when an existing bullet is clearly wrong NOW (e.g., a port number that changed, a decision that was reversed, an integration that was abandoned). Do NOT retire bullets just because they are old — verification handles freshness automatically.
+
 ANTI-BUNDLING: when multiple distinct decisions exist (e.g. a security audit covering 4 separate vulnerabilities), write one bullet per decision. Don't compress them into a single "audit X→Y" entry.
 
 Output rules:
-- Bullets ONLY, one per line, each starting with "- "
+- Optional retirements first, one per line: "RETIRE: <number>"   (number references the [N] index of an existing bullet)
+- Optional single "REASON: <text>" line after retirements (≤ 120 chars)
+- Then new bullets, one per line, each starting with "- "
 - Each bullet ≤ 200 chars, single line, fact/decision/state form
 - English only
-- If nothing new passes the rules, output exactly: NOTHING_TO_ADD
+- If nothing retires AND nothing new, output exactly: NOTHING_TO_ADD
 
 Topic: ${targetSlug}${meta.topic_type ? ` (type: ${meta.topic_type})` : ''}${meta.topic_summary ? `\nSummary: ${meta.topic_summary.replace(/\n/g, ' ')}` : ''}`;
 
-    const userPrompt = `Existing Layer 2 (curated) content:
-${existingCurated || '(empty)'}
+    const userPrompt = `Existing Layer 2 bullets (numbered for reference):
+${numberedBullets || '(empty)'}
 
 Recent events (last ${lookbackDays}d, sorted oldest→newest):
 ${eventsBlob}
 
-What new bullets should be added to Layer 2?`;
+Output retirements (if any) then new bullets, per the rules above.`;
 
     if (dryRun) {
       summary.curated.push({
         slug: targetSlug,
         recent_events: recentEvents.length,
         existing_curated_chars: existingCurated.length,
+        active_bullets: curatedEventList.length,
+        retired_bullets: curatedEventListAll.length - curatedEventList.length,
         prompt_chars: systemPrompt.length + userPrompt.length,
         bullets: [],
         verified_would_emit: verified,
+        retired_would_emit: null, // dry-run skips LLM; cannot enumerate retirements
         dry_run: true,
       });
       continue;
@@ -543,23 +564,68 @@ What new bullets should be added to Layer 2?`;
       continue;
     }
 
-    const bullets = raw
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.startsWith('- '))
+    // Parse output: RETIRE lines, optional REASON line, then bullet lines.
+    const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+    const retireNumbers = [];
+    let retireReason = null;
+    const bulletLines = [];
+    for (const line of lines) {
+      const retireMatch = line.match(/^RETIRE:\s*(\d+)\s*$/i);
+      if (retireMatch) {
+        const n = Number.parseInt(retireMatch[1], 10);
+        if (n >= 1 && n <= curatedEventList.length) retireNumbers.push(n);
+        continue;
+      }
+      const reasonMatch = line.match(/^REASON:\s*(.*)$/i);
+      if (reasonMatch && retireReason === null) {
+        const r = reasonMatch[1].trim();
+        if (r && r.length <= 120) retireReason = r;
+        continue;
+      }
+      if (line.startsWith('- ')) bulletLines.push(line);
+    }
+
+    // Resolve retire indices to seqs, dedup, sort ascending for canonical hash stability.
+    const supersededSeqs = [
+      ...new Set(retireNumbers.map((n) => curatedEventList[n - 1].seq)),
+    ].sort((a, b) => a - b);
+
+    const bullets = bulletLines
       .map((l) => l.slice(2).trim())
       .filter(Boolean)
       .filter((l) => l.length <= 200);
 
-    if (bullets.length === 0) {
-      summary.skipped.push({ slug: targetSlug, reason: 'LLM output had no valid bullets' });
+    if (bullets.length === 0 && supersededSeqs.length === 0) {
+      summary.skipped.push({ slug: targetSlug, reason: 'LLM output had no valid retirements or bullets' });
       continue;
+    }
+
+    // Emit retirement event first (if any), so projections reflect the
+    // cleaned slate alongside any new bullets emitted in this run.
+    let retired = 0;
+    if (supersededSeqs.length > 0) {
+      const retirePayload = {
+        topic: targetSlug,
+        superseded_seqs: supersededSeqs,
+        source: 'silo-curate',
+      };
+      if (retireReason) retirePayload.reason = retireReason;
+      await writer.append({
+        type: 'TOPIC_BULLETS_RETIRED',
+        isStateBearing: true,
+        intentId: `intent:${uuidv7()}`,
+        principal: principal || 'curator',
+        payload: retirePayload,
+      });
+      retired = supersededSeqs.length;
     }
 
     let written = 0;
     for (const bullet of bullets) {
-      // Light dedup: skip if existing curated content already contains the bullet verbatim
-      if (existingCurated.includes(bullet)) continue;
+      // Light dedup: skip if existing curated content (incl. retired) already
+      // contains the bullet verbatim. Using the ALL list prevents the LLM
+      // from re-introducing a bullet that was just retired.
+      if (existingCuratedAll.includes(bullet)) continue;
       await writer.append({
         type: 'write_event',
         isStateBearing: true,
@@ -576,14 +642,19 @@ What new bullets should be added to Layer 2?`;
       written += 1;
     }
 
-    // Update last_curated marker
-    if (written > 0) {
+    // Update last_curated marker if curate did anything (write OR retire).
+    if (written > 0 || retired > 0) {
       await writer.append({
         type: 'TOPIC_CURATED',
         isStateBearing: true,
         intentId: `intent:${uuidv7()}`,
         principal: principal || 'curator',
-        payload: { topic: targetSlug, source: 'silo-curate', bullets_added: written },
+        payload: {
+          topic: targetSlug,
+          source: 'silo-curate',
+          bullets_added: written,
+          bullets_retired: retired,
+        },
       });
     }
 
@@ -592,6 +663,9 @@ What new bullets should be added to Layer 2?`;
       recent_events: recentEvents.length,
       bullets_proposed: bullets.length,
       bullets_written: written,
+      bullets_retired: retired,
+      retired_seqs: supersededSeqs,
+      retire_reason: retireReason,
       verified,
       tokens_used: response?.usage?.total_tokens ?? null,
     });

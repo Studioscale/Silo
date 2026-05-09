@@ -119,6 +119,73 @@ test('regenerateTopicFile: TOPIC_VERIFIED event updates last_verified', async ()
   assert.equal(fm.last_verified, '2026-05-01');
 });
 
+test('regenerateTopicFile: TOPIC_BULLETS_RETIRED removes superseded bullets from Layer 2', async () => {
+  // Phase 2: append two new CURATED bullets, retire one, verify only the
+  // active one survives in the regenerated topic file. Imported fixture
+  // bullets are unaffected — only the explicitly retired seq disappears.
+  const { writer } = await freshImportedSilo();
+
+  // Append two new CURATED bullets to project-alpha and capture their seqs.
+  const beforeFirst = (await interpret(writer)).last_seq;
+  await writer.append({
+    type: 'write_event',
+    isStateBearing: true,
+    intentId: 'i:cur-stale',
+    principal: 'curator',
+    payload: {
+      slug: 'project-alpha',
+      tag: 'CURATED',
+      content: '- old port was 8080',
+      source: 'silo-curate',
+    },
+    ts: '2026-05-01T09:00:00Z',
+  });
+  const seqStale = beforeFirst + 1;
+
+  await writer.append({
+    type: 'write_event',
+    isStateBearing: true,
+    intentId: 'i:cur-fresh',
+    principal: 'curator',
+    payload: {
+      slug: 'project-alpha',
+      tag: 'CURATED',
+      content: '- production runs on Hetzner CPX22',
+      source: 'silo-curate',
+    },
+    ts: '2026-05-01T09:00:01Z',
+  });
+
+  // Retire the first one
+  await writer.append({
+    type: 'TOPIC_BULLETS_RETIRED',
+    isStateBearing: true,
+    intentId: 'i:retire1',
+    principal: 'curator',
+    payload: {
+      topic: 'project-alpha',
+      superseded_seqs: [seqStale],
+      reason: 'port changed',
+    },
+    ts: '2026-05-01T09:00:02Z',
+  });
+
+  const newState = await interpret(writer);
+  assert.ok(newState.retired_curated_seqs.has(seqStale));
+
+  const text = await regenerateTopicFile({ slug: 'project-alpha', logReader: writer, state: newState });
+  const curatedStart = text.indexOf('<!-- CURATED_START -->');
+  const curatedEnd = text.indexOf('<!-- CURATED_END -->');
+  const layer2 = text.slice(curatedStart + '<!-- CURATED_START -->'.length, curatedEnd);
+
+  // Active bullet present
+  assert.ok(layer2.includes('production runs on Hetzner CPX22'));
+  // Retired bullet absent
+  assert.ok(!layer2.includes('old port was 8080'));
+  // Pre-existing fixture content untouched
+  assert.ok(layer2.includes('supplier X'));
+});
+
 test('regenerateAllTopicFiles: produces files for every indexed topic', async () => {
   const { writer, state } = await freshImportedSilo();
   const files = await regenerateAllTopicFiles({ logReader: writer, state });
