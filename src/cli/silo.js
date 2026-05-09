@@ -39,7 +39,7 @@ import { importDirectory } from '../import-jarvis/index.js';
 import { regenerateProjections } from '../projection/index.js';
 import { readSessionDelta } from '../distill/transcript.js';
 import { distill } from '../distill/distill.js';
-import { tokenize } from '../distill/tokenize.js';
+import { tokenize, jaccardSimilarity } from '../distill/tokenize.js';
 import { OpenAIClient } from '../distill/openai-client.js';
 
 // Defaults can be overridden by env vars (standard CLI pattern: KUBECONFIG,
@@ -448,10 +448,27 @@ async function cmdCurate({
     }
 
     // Existing Layer 2 content (curated bullets only — what topic-import or prior curate emitted)
-    const existingCurated = history
-      .filter((h) => h.tag === 'CURATED')
-      .map((h) => h.content)
-      .join('\n\n');
+    const curatedEventList = history.filter((h) => h.tag === 'CURATED');
+    const existingCurated = curatedEventList.map((h) => h.content).join('\n\n');
+
+    // Verification backfill: if any existing curated bullet has clear topical
+    // overlap with a recent event, the bullet is "still supported" — advance
+    // last_verified_seq automatically. Threshold is looser than dedup (0.8)
+    // because we're checking topical match, not duplication.
+    let verified = false;
+    if (curatedEventList.length > 0) {
+      const VERIFY_THRESHOLD = 0.35;
+      outer: for (const c of curatedEventList) {
+        const cTokens = tokenize(c.content);
+        if (cTokens.length < 3) continue; // skip very-short bullets — too noisy
+        for (const r of recentEvents) {
+          if (jaccardSimilarity(cTokens, tokenize(r.content)) >= VERIFY_THRESHOLD) {
+            verified = true;
+            break outer;
+          }
+        }
+      }
+    }
 
     const eventsBlob = recentEvents
       .slice(-50) // cap to last 50 events to control token cost
@@ -500,9 +517,22 @@ What new bullets should be added to Layer 2?`;
         existing_curated_chars: existingCurated.length,
         prompt_chars: systemPrompt.length + userPrompt.length,
         bullets: [],
+        verified_would_emit: verified,
         dry_run: true,
       });
       continue;
+    }
+
+    // Verification backfill (independent of LLM): if a curated bullet matches
+    // a recent event, mark the topic as verified now.
+    if (verified) {
+      await writer.append({
+        type: 'TOPIC_VERIFIED',
+        isStateBearing: true,
+        intentId: `intent:${uuidv7()}`,
+        principal: principal || 'curator',
+        payload: { topic: targetSlug, source: 'silo-curate' },
+      });
     }
 
     const response = await llm.complete(systemPrompt, userPrompt);
@@ -562,6 +592,7 @@ What new bullets should be added to Layer 2?`;
       recent_events: recentEvents.length,
       bullets_proposed: bullets.length,
       bullets_written: written,
+      verified,
       tokens_used: response?.usage?.total_tokens ?? null,
     });
   }
