@@ -72,7 +72,7 @@ Most AI memory systems work like this:
 |--------|-----------|----------------|
 | Auto-load per session | ~5-8 KB (rules + index + today's events) | 10-50 KB (everything, always) |
 | Context relevance | High (load only the topic you need) | Low (entire memory loads every time) |
-| Curation cost | ~$5-10/month (GPT-5.4 extraction + GPT-5.4 curation, gpt-4o for high-volume) | $0 (no curation = no cost = no quality) |
+| Curation cost | ~$2-5/month (Sonnet-4.6 extraction + curation; auto-detected from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) | $0 (no curation = no cost = no quality) |
 | Fact staleness tracking | Per-topic `last_verified` dates with type-specific thresholds | None |
 | Changelog | Every change recorded with old value, new value, date, reason | None (overwritten silently) |
 | Confidence levels | CONFIRMED / TENTATIVE / CONTEXT | None |
@@ -93,6 +93,26 @@ Most AI memory systems work like this:
 - If you have one narrow use case and 20 facts to remember, a flat file is fine.
 - If you want zero-cost, zero-maintenance memory, look at [MemPalace](https://github.com/milla-jovovich/mempalace) (zero LLM cost, 96.6% retrieval, but no curation, no changelogs, no domain organization).
 
+## Prerequisites
+
+Silo's manual operations (`silo write`, `silo read`, `silo search`, regeneration, MCP bridge) work standalone — no LLM required.
+
+The two automated pipelines need an LLM provider:
+
+- **`silo extract`** — distills events from session transcripts
+- **`silo curate`** — promotes events to Layer 2 and retires stale bullets
+
+Set one of the following environment variables before running them:
+
+| Provider  | Env var               | Default model        |
+|-----------|-----------------------|----------------------|
+| Anthropic | `ANTHROPIC_API_KEY`   | `claude-sonnet-4-6`  |
+| OpenAI    | `OPENAI_API_KEY`      | `gpt-4o`             |
+
+If both keys are set, Anthropic is preferred. Override the default with `--model=<id>` — the provider is auto-detected from the model prefix (`claude-*` → Anthropic, `gpt-*` / `o<digit>` / `chatgpt-*` → OpenAI).
+
+Without a provider configured, `silo curate` and `silo extract` fail fast with an `ANTHROPIC_API_KEY or OPENAI_API_KEY required` error. All other commands work as-is.
+
 ## Quick start
 
 - **OpenClaw:** [quickstart/openclaw/SETUP.md](quickstart/openclaw/SETUP.md) — Full setup with automated pipelines (~30 minutes)
@@ -112,7 +132,7 @@ Most AI memory systems work like this:
 
 Silo was designed by [Helder Santiago](https://github.com/Studioscale) as the memory system for a production AI assistant managing 25 knowledge domains for a metal fabrication business in Brazil. It handles bilingual content (Portuguese/English), business operations, personal projects, technical systems, and hobby tracking — all with domain separation, confidence tracking, and full audit trails.
 
-The architecture was researched, directed, and decided by Helder. Engineering and documentation were done with Claude (Opus, 1M context). The v12.5 spec was stress-tested through 57 audit rounds across 19 drafts, with three independent reviewers each round (Claude, ChatGPT, Gemini). The implementation runs on OpenClaw with GPT-5.4 for extraction and curation. Production cutover happened 2026-04-22; the system has been the live memory authority since.
+The architecture was researched, directed, and decided by Helder. Engineering and documentation were done with Claude (Opus, 1M context). The v12.5 spec was stress-tested through 57 audit rounds across 19 drafts, with three independent reviewers each round (Claude, ChatGPT, Gemini). The implementation runs on OpenClaw with Claude Sonnet 4.6 for extraction and curation (previously GPT-5.4 — switched 2026-05-10). Production cutover happened 2026-04-22; the system has been the live memory authority since.
 
 For the journey from v3.x (script-based, files-as-truth) to v12.5 (operation-log + projections), see [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
