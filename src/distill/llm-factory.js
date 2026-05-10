@@ -15,7 +15,7 @@
 import { OpenAIClient } from './openai-client.js';
 import { AnthropicClient } from './anthropic-client.js';
 
-const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5';
+const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_OPENAI_MODEL = 'gpt-4o';
 
 export function pickLlmClient({ model } = {}) {

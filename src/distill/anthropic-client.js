@@ -19,7 +19,7 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 export class AnthropicClient {
   constructor({
     apiKey,
-    model = 'claude-haiku-4-5',
+    model = 'claude-sonnet-4-6',
     host = DEFAULT_HOST,
     path = DEFAULT_PATH,
     apiVersion = DEFAULT_VERSION,

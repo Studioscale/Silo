@@ -47,11 +47,13 @@ test('pickLlmClient: explicit gpt-* model picks OpenAI', () => {
   });
 });
 
-test('pickLlmClient: no model + only ANTHROPIC_API_KEY → Anthropic with default haiku', () => {
+test('pickLlmClient: no model + only ANTHROPIC_API_KEY → Anthropic with default sonnet', () => {
+  // Default matches production crons (silo-curate.sh, silo-session-extract.sh)
+  // so ad-hoc CLI runs and scheduled runs use the same model.
   withEnv({ ANTHROPIC_API_KEY: 'sk-ant-fake', OPENAI_API_KEY: undefined }, () => {
     const { client, providerName } = pickLlmClient({});
     assert.equal(providerName, 'anthropic');
-    assert.equal(client.model, 'claude-haiku-4-5');
+    assert.equal(client.model, 'claude-sonnet-4-6');
   });
 });
 
