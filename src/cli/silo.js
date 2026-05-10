@@ -445,14 +445,17 @@ async function cmdCurate({
     }
 
     // Existing Layer 2 content. Two views:
-    //   - ALL list: every CURATED write_event (incl. retired) — used for verbatim
-    //     dedup so the LLM cannot re-introduce a bullet that was just retired.
-    //   - ACTIVE list: non-retired only — used for the prompt + verification.
+    //   - ALL list: every CURATED write_event (incl. retired) — used only to
+    //     compute the retired_bullets count in the dry-run summary.
+    //   - ACTIVE list: non-retired only — used for the prompt, verification,
+    //     and verbatim dedup. Dedup against ACTIVE only (not ALL) lets a
+    //     bullet retired by a prior curate run be reintroduced verbatim —
+    //     no permanent-banlist effect, no UNRETIRE primitive needed.
+    //     Phase 2.1 hardening (Gemini Finding 2, ChatGPT Finding 7).
     const curatedEventListAll = history.filter((h) => h.tag === 'CURATED');
     const curatedEventList = curatedEventListAll.filter(
       (h) => !state.retired_curated_seqs.has(h.seq),
     );
-    const existingCuratedAll = curatedEventListAll.map((h) => h.content).join('\n\n');
     const existingCurated = curatedEventList.map((h) => h.content).join('\n\n');
 
     // Verification backfill: if any active curated bullet has clear topical
@@ -619,10 +622,16 @@ Output retirements (if any) then new bullets, per the rules above.`;
 
     let written = 0;
     for (const bullet of bullets) {
-      // Light dedup: skip if existing curated content (incl. retired) already
-      // contains the bullet verbatim. Using the ALL list prevents the LLM
-      // from re-introducing a bullet that was just retired.
-      if (existingCuratedAll.includes(bullet)) continue;
+      // Light dedup: skip if a currently-active curated bullet already
+      // contains the bullet verbatim. We check `existingCurated` (the
+      // pre-LLM active list) rather than `existingCuratedAll`. This:
+      //   (a) prevents reintroducing a bullet that's still active
+      //   (b) prevents reintroducing a bullet being retired in THIS run
+      //       (which was in the active list at prompt-time, before retire)
+      //   (c) ALLOWS reintroducing a bullet retired by a prior curate run,
+      //       so retire is recoverable without an UNRETIRE primitive.
+      // Phase 2.1 hardening — Gemini Finding 2, ChatGPT Finding 7.
+      if (existingCurated.includes(bullet)) continue;
       await writer.append({
         type: 'write_event',
         isStateBearing: true,

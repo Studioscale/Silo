@@ -186,19 +186,59 @@ function applyEntry(state, entry) {
     case 'TOPIC_BULLETS_RETIRED': {
       // Phase 2 of dreaming-inspired upgrade: curation pipeline can supersede
       // Layer 2 bullets by seq. Defensive parse — malformed payload silently
-      // skipped so interpret() stays total. Cross-topic protection: only
+      // recorded so interpret() stays total. Cross-topic protection: only
       // accept seqs that reference a CURATED write_event on THIS topic.
+      //
+      // Phase 2.1 hardening (Claude Finding 5/7/18, ChatGPT Finding 4 partial):
+      // Every silently-dropped seq is recorded in state.skipped so a future
+      // `silo verify` or projection can surface them. Silent and observable
+      // are not opposed.
       const payload = entry.payload || {};
       const { topic, superseded_seqs } = payload;
-      if (!topic || !Array.isArray(superseded_seqs)) break;
+      if (!topic) {
+        state.skipped.push({
+          seq: entry.seq,
+          reason: 'topic_bullets_retired_missing_topic',
+          type: entry.type,
+        });
+        break;
+      }
+      if (!Array.isArray(superseded_seqs)) {
+        state.skipped.push({
+          seq: entry.seq,
+          reason: 'topic_bullets_retired_superseded_seqs_not_array',
+          type: entry.type,
+          topic,
+        });
+        break;
+      }
       const history = state.topic_content.get(topic) || [];
       const validSeqs = new Set(
         history.filter((h) => h.tag === 'CURATED').map((h) => h.seq),
       );
       for (const s of superseded_seqs) {
-        if (typeof s === 'number' && Number.isFinite(s) && s > 0 && validSeqs.has(s)) {
-          state.retired_curated_seqs.add(s);
+        const isFiniteNumber = typeof s === 'number' && Number.isFinite(s) && s > 0;
+        if (!isFiniteNumber) {
+          state.skipped.push({
+            seq: entry.seq,
+            reason: 'topic_bullets_retired_invalid_seq_type',
+            type: entry.type,
+            topic,
+            bad_value: s,
+          });
+          continue;
         }
+        if (!validSeqs.has(s)) {
+          state.skipped.push({
+            seq: entry.seq,
+            reason: 'topic_bullets_retired_seq_not_curated_in_topic',
+            type: entry.type,
+            topic,
+            bad_seq: s,
+          });
+          continue;
+        }
+        state.retired_curated_seqs.add(s);
       }
       break;
     }

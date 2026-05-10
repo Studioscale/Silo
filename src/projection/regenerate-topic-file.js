@@ -135,7 +135,17 @@ function buildFrontmatter({ slug, events, state }) {
  * Does NOT wrap bare content in a synthetic "## Curated" heading — that was a
  * regenerator bug caught during parity check with Helder's real corpus.
  */
-function buildLayer2(events, retiredSeqs = new Set()) {
+function buildLayer2(events, retiredSeqs) {
+  // Phase 2.1 hardening (Claude Finding 8): retiredSeqs is REQUIRED.
+  // The previous default-arg `= new Set()` was a silent-regression hazard —
+  // any caller that forgot to pass state.retired_curated_seqs would include
+  // retired bullets in Layer 2 without error. Internal API; no external
+  // caller exists. Fail loud instead of soft.
+  if (!(retiredSeqs instanceof Set)) {
+    throw new Error(
+      'buildLayer2: retiredSeqs (Set<seq>) is required; pass state.retired_curated_seqs',
+    );
+  }
   const curatedEvents = events.filter((e) => {
     if (e.type !== 'write_event') return false;
     if (e.payload?.tag !== 'CURATED') return false;

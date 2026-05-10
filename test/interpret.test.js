@@ -278,10 +278,18 @@ test('interpret: TOPIC_BULLETS_RETIRED populates retired_curated_seqs', async ()
   assert.ok(state.retired_curated_seqs.has(3));
   assert.ok(!state.retired_curated_seqs.has(5));
   assert.equal(state.retired_curated_seqs.size, 1);
+  // Phase 2.1: the cross-topic-smuggled seq 5 should surface in state.skipped
+  const crossTopicSkips = state.skipped.filter(
+    (s) => s.reason === 'topic_bullets_retired_seq_not_curated_in_topic',
+  );
+  assert.equal(crossTopicSkips.length, 1);
+  assert.equal(crossTopicSkips[0].bad_seq, 5);
+  assert.equal(crossTopicSkips[0].topic, 'topic-a');
 });
 
 test('interpret: TOPIC_BULLETS_RETIRED with malformed payload does not throw', async () => {
-  // Totality invariant: malformed retire payloads silently skip the bad seqs.
+  // Totality invariant: malformed retire payloads silently skip the bad seqs,
+  // but Phase 2.1 hardening records each one in state.skipped for audit.
   const { writer } = await freshSilo();
   await writer.append({
     type: 'PRINCIPAL_DECLARED',
@@ -301,6 +309,60 @@ test('interpret: TOPIC_BULLETS_RETIRED with malformed payload does not throw', a
   });
   const state = await interpret(writer);
   assert.equal(state.retired_curated_seqs.size, 0);
+  // Phase 2.1: every bad seq should be in state.skipped.
+  // 'not-a-number', null → invalid_seq_type (2 entries)
+  // -1, 0 → invalid_seq_type (s > 0 check, 2 more)
+  // 9999 → seq_not_curated_in_topic (1 entry; passes type check, fails validSeqs)
+  const retireSkips = state.skipped.filter((s) => s.type === 'TOPIC_BULLETS_RETIRED');
+  assert.equal(retireSkips.length, 5);
+  const typeErrors = retireSkips.filter(
+    (s) => s.reason === 'topic_bullets_retired_invalid_seq_type',
+  );
+  assert.equal(typeErrors.length, 4);
+  const notCuratedErrors = retireSkips.filter(
+    (s) => s.reason === 'topic_bullets_retired_seq_not_curated_in_topic',
+  );
+  assert.equal(notCuratedErrors.length, 1);
+  assert.equal(notCuratedErrors[0].bad_seq, 9999);
+});
+
+test('interpret: TOPIC_BULLETS_RETIRED with missing topic records skip', async () => {
+  // Phase 2.1: missing topic field is a structural failure; record in skipped.
+  const { writer } = await freshSilo();
+  await writer.append({
+    type: 'TOPIC_BULLETS_RETIRED',
+    isStateBearing: true,
+    intentId: 'intent:r-no-topic',
+    principal: 'curator',
+    payload: { superseded_seqs: [1, 2, 3] }, // no topic
+    ts: '2026-04-22T10:00:00Z',
+  });
+  const state = await interpret(writer);
+  assert.equal(state.retired_curated_seqs.size, 0);
+  const skips = state.skipped.filter(
+    (s) => s.reason === 'topic_bullets_retired_missing_topic',
+  );
+  assert.equal(skips.length, 1);
+});
+
+test('interpret: TOPIC_BULLETS_RETIRED with non-array superseded_seqs records skip', async () => {
+  // Phase 2.1: superseded_seqs must be an array; record in skipped.
+  const { writer } = await freshSilo();
+  await writer.append({
+    type: 'TOPIC_BULLETS_RETIRED',
+    isStateBearing: true,
+    intentId: 'intent:r-not-arr',
+    principal: 'curator',
+    payload: { topic: 'topic-a', superseded_seqs: 'not-an-array' },
+    ts: '2026-04-22T10:00:00Z',
+  });
+  const state = await interpret(writer);
+  assert.equal(state.retired_curated_seqs.size, 0);
+  const skips = state.skipped.filter(
+    (s) => s.reason === 'topic_bullets_retired_superseded_seqs_not_array',
+  );
+  assert.equal(skips.length, 1);
+  assert.equal(skips[0].topic, 'topic-a');
 });
 
 test('interpret: is total — malformed entry does not throw, surfaces in skipped[]', async () => {
