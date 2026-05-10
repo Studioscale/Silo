@@ -40,7 +40,7 @@ import { regenerateProjections } from '../projection/index.js';
 import { readSessionDelta } from '../distill/transcript.js';
 import { distill } from '../distill/distill.js';
 import { tokenize, jaccardSimilarity } from '../distill/tokenize.js';
-import { OpenAIClient } from '../distill/openai-client.js';
+import { pickLlmClient } from '../distill/llm-factory.js';
 
 // Defaults can be overridden by env vars (standard CLI pattern: KUBECONFIG,
 // AWS_PROFILE, EDITOR, etc.) so users don't have to pass --silo-dir and
@@ -319,11 +319,9 @@ async function cmdExtract({
       .join('\n');
   }
 
-  const apiKey = process.env.OPENAI_API_KEY;
-  const llm = apiKey ? new OpenAIClient({ apiKey, model: model || 'gpt-4o' }) : null;
-
+  const { client: llm, error: llmError } = pickLlmClient({ model });
   if (!llm) {
-    console.error('silo extract: OPENAI_API_KEY env var required (or inject your own client via API)');
+    console.error(`silo extract: ${llmError} (or inject your own client via API)`);
     process.exit(2);
   }
 
@@ -413,10 +411,9 @@ async function cmdCurate({
   const minNewEvents = minEvents ? Number.parseInt(minEvents, 10) : 3;
   const cutoffTs = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
 
-  const apiKey = process.env.OPENAI_API_KEY;
-  const llm = apiKey ? new OpenAIClient({ apiKey, model: model || 'gpt-4o' }) : null;
+  const { client: llm, error: llmError } = pickLlmClient({ model });
   if (!llm && !dryRun) {
-    console.error('silo curate: OPENAI_API_KEY env var required (or use --dry-run)');
+    console.error(`silo curate: ${llmError} (or use --dry-run)`);
     process.exit(2);
   }
 
