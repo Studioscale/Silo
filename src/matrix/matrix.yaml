@@ -126,9 +126,21 @@ events:
 
   # TOPIC_BULLETS_RETIRED: curation pipeline retires Layer 2 (CURATED) bullets
   # by seq when recent events contradict or invalidate them. Phase 2 of the
-  # dreaming-inspired upgrade. Payload: { topic, superseded_seqs: [int...],
-  # reason?: string }. interpret() folds superseded_seqs into
+  # dreaming-inspired upgrade. interpret() folds superseded_seqs into
   # state.retired_curated_seqs; projection's buildLayer2 skips retired seqs.
+  #
+  # Payload contract (enforced by src/admission/payload-validators.js — see
+  # Phase 2.1 audit-packet for design context):
+  #   topic:           nonblank string
+  #   superseded_seqs: array, length 1..256, strictly ascending,
+  #                    items are safe positive integers (Number.isSafeInteger),
+  #                    each <= the writer's last known committed seq
+  #                    (cannot reference future/uncommitted entries)
+  #   reason:          optional; nonblank one-line string, ≤120 chars,
+  #                    no \r or \n
+  #   source:          optional; string
+  # Unknown fields are rejected to preserve JCS canonical hash stability
+  # across emitters of the same intent.
   TOPIC_BULLETS_RETIRED:
     is_state_bearing: true
     family: topic

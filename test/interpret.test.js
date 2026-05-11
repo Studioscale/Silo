@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { LogWriter } from '../src/log/append.js';
 import { interpret } from '../src/interpret/index.js';
 import { loadMatrix } from '../src/matrix/load.js';
+import { appendUnsafeForTest } from './helpers/append-unsafe.js';
 
 async function freshSilo() {
   const dir = await fs.mkdtemp(join(tmpdir(), 'silo-interp-'));
@@ -290,6 +291,12 @@ test('interpret: TOPIC_BULLETS_RETIRED populates retired_curated_seqs', async ()
 test('interpret: TOPIC_BULLETS_RETIRED with malformed payload does not throw', async () => {
   // Totality invariant: malformed retire payloads silently skip the bad seqs,
   // but Phase 2.1 hardening records each one in state.skipped for audit.
+  //
+  // Phase 2.1 Group B: admission validator now rejects malformed retire
+  // payloads at write time, so we use appendUnsafeForTest to bypass admission
+  // and simulate either (a) pre-validator log entries that interpret() must
+  // still tolerate, or (b) out-of-band/manual log corruption. interpret() must
+  // remain total regardless of how the malformed entry got there.
   const { writer } = await freshSilo();
   await writer.append({
     type: 'PRINCIPAL_DECLARED',
@@ -299,7 +306,7 @@ test('interpret: TOPIC_BULLETS_RETIRED with malformed payload does not throw', a
     payload: { principal: 'helder', class: 'human' },
     ts: '2026-04-22T10:00:00Z',
   });
-  await writer.append({
+  await appendUnsafeForTest(writer, {
     type: 'TOPIC_BULLETS_RETIRED',
     isStateBearing: true,
     intentId: 'intent:r-bad',
@@ -328,8 +335,10 @@ test('interpret: TOPIC_BULLETS_RETIRED with malformed payload does not throw', a
 
 test('interpret: TOPIC_BULLETS_RETIRED with missing topic records skip', async () => {
   // Phase 2.1: missing topic field is a structural failure; record in skipped.
+  // Uses appendUnsafeForTest to bypass admission validation (which now
+  // rejects missing-topic payloads at write time).
   const { writer } = await freshSilo();
-  await writer.append({
+  await appendUnsafeForTest(writer, {
     type: 'TOPIC_BULLETS_RETIRED',
     isStateBearing: true,
     intentId: 'intent:r-no-topic',
@@ -347,8 +356,9 @@ test('interpret: TOPIC_BULLETS_RETIRED with missing topic records skip', async (
 
 test('interpret: TOPIC_BULLETS_RETIRED with non-array superseded_seqs records skip', async () => {
   // Phase 2.1: superseded_seqs must be an array; record in skipped.
+  // Uses appendUnsafeForTest to bypass admission validation.
   const { writer } = await freshSilo();
-  await writer.append({
+  await appendUnsafeForTest(writer, {
     type: 'TOPIC_BULLETS_RETIRED',
     isStateBearing: true,
     intentId: 'intent:r-not-arr',

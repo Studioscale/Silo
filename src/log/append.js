@@ -17,6 +17,7 @@ import { createReadStream } from 'node:fs';
 import { join } from 'node:path';
 import { buildEntry, entryHash, serializeEntry, GENESIS_HASH } from './entry.js';
 import { canonicalHash } from './canonical.js';
+import { validatePayloadForAppend } from '../admission/payload-validators.js';
 
 function currentLogFilename(date = new Date()) {
   const yyyy = date.getUTCFullYear();
@@ -94,6 +95,15 @@ export class LogWriter {
 
   async _doAppend({ type, isStateBearing, intentId, principal, payload, ts }) {
     const tail = this._tail ?? { seq: 0, hash: GENESIS_HASH };
+
+    // Phase 2.1: payload admission validation before canonicalize/hash-chain.
+    // Currently only TOPIC_BULLETS_RETIRED has admission-time validation;
+    // other event types pass through. Throws AdmissionValidationError on
+    // failure — bad payloads never land. Test-only paths that need to write
+    // malformed events for replay-tolerance tests use
+    // test/helpers/append-unsafe.js, which lives outside src/ and is not
+    // reachable from production imports.
+    validatePayloadForAppend({ type, payload }, { maxKnownSeq: tail.seq });
 
     const entry = buildEntry({
       type,
