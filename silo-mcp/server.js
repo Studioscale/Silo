@@ -2,18 +2,26 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import { readFile, writeFile, stat, readdir, access } from 'fs/promises';
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
+import { buildSiloNotices, loadPendingSuggestions } from './notices.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const SILO_BASE = '/root/clawd-v3';
+// Phase 2.2 + 2.3 added explicit env overrides for the data + source dirs so
+// the MCP server can run against a local checkout for development (the
+// production VPS defaults match the install layout).
+const SILO_BASE = process.env.SILO_BASE || '/root/clawd-v3';
+const SILO_DIR = process.env.SILO_DIR || '/root/.silo';
+const SILO_SRC_DIR = process.env.SILO_SRC_DIR || '/root/silo';
+const SILO_CLI = `${SILO_SRC_DIR}/src/cli/silo.js`;
 const TOPIC_INDEX_PATH = join(SILO_BASE, 'TOPIC-INDEX.md');
 const TOPICS_DIR = join(SILO_BASE, 'topics');
 const EVENTS_DIR = join(SILO_BASE, 'events');
+const PENDING_SUGGESTIONS_PATH = join(SILO_BASE, 'PENDING-SUGGESTIONS.json');
 const HANDOFF_DIR = join(SILO_BASE, 'handoff/cc-to-jarvis');
 const HANDOFF_PROCESSED_DIR = join(HANDOFF_DIR, 'processed');
 
@@ -154,6 +162,27 @@ function todayStr() {
   return brt.toISOString().slice(0, 10);
 }
 
+// Shared notice builder for read_index / search / list_handoffs. Phase 2.3
+// will pass updateStatus when its cache file exists; for Phase 2.2 only
+// pending_topic_suggestions can fire.
+async function siloNoticesForRead() {
+  return buildSiloNotices({ pendingPath: PENDING_SUGGESTIONS_PATH });
+}
+
+/** Spawn `silo regenerate` after a successful accept/dismiss. Returns bool. */
+function regenerateAfterWrite() {
+  const r = spawnSync('node', [
+    SILO_CLI, 'regenerate',
+    `--silo-dir=${SILO_DIR}`,
+    `--to=${SILO_BASE}`,
+  ], { encoding: 'utf-8' });
+  if (r.status === 0) {
+    // Invalidate caches the regen affects.
+    indexCache = { content: null, mtime: null, slugs: null, topics: null };
+  }
+  return r.status === 0;
+}
+
 // ── Tool Registration ─────────────────────────────────────────────────────
 
 function registerTools(server) {
@@ -167,7 +196,10 @@ server.tool(
   async () => {
     try {
       const idx = await loadTopicIndex();
-      return successResult({ topics: idx.topics });
+      const result = { topics: idx.topics };
+      const notices = await siloNoticesForRead();
+      if (notices) result._silo_notices = notices;
+      return successResult(result);
     } catch (err) {
       return errorResult(err.code || 'FS_ERROR', err.message);
     }
@@ -270,7 +302,10 @@ server.tool(
         }
         return { score: 0, text: line };
       });
-      return successResult({ results, query, total_matches: results.length });
+      const out = { results, query, total_matches: results.length };
+      const notices = await siloNoticesForRead();
+      if (notices) out._silo_notices = notices;
+      return successResult(out);
     } catch (err) {
       if (err.killed) {
         return errorResult('SEARCH_TIMEOUT', 'BM25 search timed out after 10 seconds');
@@ -309,9 +344,17 @@ server.tool(
           }
         } catch { /* skip unreadable files */ }
       }
-      return successResult({ files });
+      const out = { files };
+      const notices = await siloNoticesForRead();
+      if (notices) out._silo_notices = notices;
+      return successResult(out);
     } catch (err) {
-      if (err.code === 'ENOENT') return successResult({ files: [] });
+      if (err.code === 'ENOENT') {
+        const out = { files: [] };
+        const notices = await siloNoticesForRead();
+        if (notices) out._silo_notices = notices;
+        return successResult(out);
+      }
       return errorResult('FS_ERROR', `Failed to list handoffs: ${err.message}`);
     }
   }
@@ -472,6 +515,123 @@ server.tool(
     } catch (err) {
       return errorResult('FS_ERROR', `Failed to write handoff: ${err.message}`);
     }
+  }
+);
+
+// ── Tool 8: list_pending_suggestions (Phase 2.2 §7.1) ──────────────────────
+
+server.tool(
+  'list_pending_suggestions',
+  'Lists pending topic suggestions detected by silo-detect. Returns the suggestions envelope with count, cap_reached, and detector_status. Surface to the user when convenient — they can accept_suggestion or dismiss_suggestion.',
+  {},
+  async () => {
+    const envelope = await loadPendingSuggestions(PENDING_SUGGESTIONS_PATH);
+    if (!envelope) {
+      return successResult({
+        schema_version: 1,
+        suggestions: [],
+        count: 0,
+        cap: 10,
+        cap_reached: false,
+        detector_status: null,
+      });
+    }
+    return successResult(envelope);
+  }
+);
+
+// ── Tool 9: accept_suggestion (Phase 2.2 §7.2) ─────────────────────────────
+
+server.tool(
+  'accept_suggestion',
+  'Accept a pending topic suggestion. Server emits TOPIC_METADATA_SET + TOPIC_SUGGESTION_ACCEPTED as an atomic batch under the operation-log lock, then regenerates projections. Optional overrides let the user refine the slug, summary, type, or tags before the topic file is created.',
+  {
+    suggestion_seq: z.number().int().positive().describe('Seq of the TOPIC_SUGGESTED event being accepted'),
+    slug: z.string().optional().describe('Override the suggested slug'),
+    description: z.string().optional().describe('Override the topic summary'),
+    type: z.enum(['reference', 'project', 'feedback', 'personal', 'archive', 'business', 'hobby']).optional(),
+    tags: z.array(z.string()).optional(),
+  },
+  async ({ suggestion_seq, slug, description, type, tags }) => {
+    const args = [
+      SILO_CLI, 'suggest',
+      '--accept', String(suggestion_seq),
+      `--silo-dir=${SILO_DIR}`,
+      '--principal=desktop-claude',
+    ];
+    if (slug) args.push(`--slug=${slug}`);
+    if (description) args.push(`--description=${description}`);
+    if (type) args.push(`--type=${type}`);
+    if (tags?.length) args.push(`--tags=${tags.join(',')}`);
+    const r = spawnSync('node', args, { encoding: 'utf-8' });
+    if (r.status !== 0) {
+      // SuggestionOpError code is printed on stderr; pluck it for caller.
+      const m = (r.stderr || '').match(/silo suggest --accept: ([A-Z_]+) —/);
+      const code = m ? m[1] : 'ACCEPT_FAILED';
+      return errorResult(code, r.stderr || r.stdout || 'accept failed');
+    }
+    const accepted = JSON.parse(r.stdout);
+    const regenerated = regenerateAfterWrite();
+    let topic_visible_in_index = false;
+    if (regenerated) {
+      try {
+        const idx = await loadTopicIndex();
+        topic_visible_in_index = idx.slugs.has(accepted.slug);
+      } catch { /* index unreadable — leave false */ }
+    }
+    return successResult({
+      accepted: true,
+      accepted_seq: accepted.accepted_seq,
+      metadata_seq: accepted.metadata_seq,
+      slug: accepted.slug,
+      regenerated,
+      topic_visible_in_index,
+    });
+  }
+);
+
+// ── Tool 10: dismiss_suggestion (Phase 2.2 §7.3) ───────────────────────────
+
+server.tool(
+  'dismiss_suggestion',
+  'Dismiss one or more pending topic suggestions. All-or-nothing — any invalid seq aborts the whole call with a structured error. Default cooldown 90 days; the same slug (normalized) cannot re-propose until the cooldown expires.',
+  {
+    suggestion_seqs: z.array(z.number().int().positive()).min(1).max(50),
+    cooldown_days: z.number().int().min(1).max(365).optional().describe('Default 90'),
+    reason: z.string().max(120).optional(),
+  },
+  async ({ suggestion_seqs, cooldown_days, reason }) => {
+    const args = [
+      SILO_CLI, 'suggest',
+      '--dismiss', suggestion_seqs.join(','),
+      `--silo-dir=${SILO_DIR}`,
+      '--principal=desktop-claude',
+    ];
+    if (cooldown_days != null) args.push(`--cooldown-days=${cooldown_days}`);
+    if (reason) args.push(`--reason=${reason}`);
+    const r = spawnSync('node', args, { encoding: 'utf-8' });
+    if (r.status !== 0) {
+      const m = (r.stderr || '').match(/silo suggest --dismiss: ([A-Z_]+) —/);
+      const code = m ? m[1] : 'DISMISS_FAILED';
+      // Try to extract the structured `invalid` detail JSON if present.
+      let detail = null;
+      const detailMatch = (r.stderr || '').match(/(\{[\s\S]*\})/);
+      if (detailMatch) {
+        try { detail = JSON.parse(detailMatch[1]); } catch { /* ignore */ }
+      }
+      const err = errorResult(code, r.stderr || r.stdout || 'dismiss failed');
+      if (detail) {
+        try {
+          const obj = JSON.parse(err.content[0].text);
+          obj.detail = detail;
+          err.content[0].text = JSON.stringify(obj, null, 2);
+        } catch { /* shouldn't happen */ }
+      }
+      return err;
+    }
+    const dismissed = JSON.parse(r.stdout);
+    regenerateAfterWrite();
+    return successResult(dismissed);
   }
 );
 
