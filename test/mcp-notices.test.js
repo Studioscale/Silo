@@ -14,7 +14,10 @@ import { join } from 'node:path';
 import {
   buildSiloNotices,
   loadPendingSuggestions,
+  loadUpdateStatus,
+  isUpdateOptOut,
   _resetPendingCache,
+  _resetUpdateCache,
 } from '../silo-mcp/notices.js';
 
 async function writeEnvelope(path, envelope) {
@@ -204,6 +207,50 @@ test('buildSiloNotices: updateCheckDisabled suppresses update_* notices even if 
     },
   });
   assert.equal(notices, null);
+});
+
+// ── loadUpdateStatus + isUpdateOptOut ────────────────────────────────────────
+
+test('loadUpdateStatus: missing file → null', async () => {
+  _resetUpdateCache();
+  const dir = await fs.mkdtemp(join(tmpdir(), 'silo-notice-'));
+  const status = await loadUpdateStatus(join(dir, 'update-status.json'));
+  assert.equal(status, null);
+});
+
+test('loadUpdateStatus: malformed JSON → null + stderr warning', async () => {
+  _resetUpdateCache();
+  const dir = await fs.mkdtemp(join(tmpdir(), 'silo-notice-'));
+  const path = join(dir, 'update-status.json');
+  await fs.writeFile(path, '{ not valid');
+  const original = console.warn;
+  let warned = false;
+  console.warn = () => { warned = true; };
+  try {
+    const status = await loadUpdateStatus(path);
+    assert.equal(status, null);
+    assert.equal(warned, true);
+  } finally {
+    console.warn = original;
+  }
+});
+
+test('loadUpdateStatus: mtime cache returns same object on second call', async () => {
+  _resetUpdateCache();
+  const dir = await fs.mkdtemp(join(tmpdir(), 'silo-notice-'));
+  const path = join(dir, 'update-status.json');
+  await fs.writeFile(path, JSON.stringify({ schema_version: 1, latest_version: '0.1.0-m2' }));
+  const a = await loadUpdateStatus(path);
+  const b = await loadUpdateStatus(path);
+  assert.equal(a, b);
+});
+
+test('isUpdateOptOut: same predicate as silo-cli (1/true/yes/on case-insensitive)', () => {
+  for (const v of ['1', 'TRUE', 'yes', 'On']) {
+    assert.equal(isUpdateOptOut({ SILO_DISABLE_UPDATE_CHECK: v }), true);
+  }
+  assert.equal(isUpdateOptOut({}), false);
+  assert.equal(isUpdateOptOut({ SILO_DISABLE_UPDATE_CHECK: '0' }), false);
 });
 
 test('buildSiloNotices: pending_topic_suggestions and update_available coexist in array', async () => {

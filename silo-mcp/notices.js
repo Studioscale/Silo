@@ -23,10 +23,26 @@
 import { readFile, stat } from 'node:fs/promises';
 
 let pendingCache = { mtime: null, envelope: null };
+let updateCache = { mtime: null, status: null };
 
-/** Test seam — reset the in-memory cache between assertions. */
+/** Test seam — reset the in-memory caches between assertions. */
 export function _resetPendingCache() {
   pendingCache = { mtime: null, envelope: null };
+}
+export function _resetUpdateCache() {
+  updateCache = { mtime: null, status: null };
+}
+
+// ── Opt-out predicate (Phase 2.3 §3.6) ─────────────────────────────────────
+// Replicated locally rather than imported from silo/src/util/update-check.js
+// because silo-mcp/ is a separate package (own package.json, own node_modules
+// on the VPS); cross-package imports would break the install boundary.
+// Keep this list in sync with src/util/update-check.js OPT_OUT_VALUES.
+const OPT_OUT_VALUES = new Set(['1', 'true', 'yes', 'on']);
+export function isUpdateOptOut(env = process.env) {
+  const v = env.SILO_DISABLE_UPDATE_CHECK;
+  if (v == null) return false;
+  return OPT_OUT_VALUES.has(String(v).toLowerCase().trim());
 }
 
 /**
@@ -36,6 +52,30 @@ export function _resetPendingCache() {
  * @param {string} pendingPath - absolute path to PENDING-SUGGESTIONS.json
  * @returns {Promise<Object|null>}
  */
+/**
+ * Read update-status.json with mtime caching. Same shape as
+ * loadPendingSuggestions — missing/malformed → null.
+ *
+ * @param {string} updatePath - absolute path to update-status.json
+ * @returns {Promise<Object|null>}
+ */
+export async function loadUpdateStatus(updatePath) {
+  try {
+    const st = await stat(updatePath);
+    if (updateCache.mtime === st.mtimeMs) return updateCache.status;
+    const raw = await readFile(updatePath, 'utf8');
+    const status = JSON.parse(raw);
+    updateCache = { mtime: st.mtimeMs, status };
+    return status;
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    console.warn(
+      `silo-mcp: failed to load update-status.json (${updatePath}): ${err.message}`,
+    );
+    return null;
+  }
+}
+
 export async function loadPendingSuggestions(pendingPath) {
   try {
     const st = await stat(pendingPath);

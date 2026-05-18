@@ -7,7 +7,12 @@ import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
-import { buildSiloNotices, loadPendingSuggestions } from './notices.js';
+import {
+  buildSiloNotices,
+  loadPendingSuggestions,
+  loadUpdateStatus,
+  isUpdateOptOut,
+} from './notices.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -22,6 +27,11 @@ const TOPIC_INDEX_PATH = join(SILO_BASE, 'TOPIC-INDEX.md');
 const TOPICS_DIR = join(SILO_BASE, 'topics');
 const EVENTS_DIR = join(SILO_BASE, 'events');
 const PENDING_SUGGESTIONS_PATH = join(SILO_BASE, 'PENDING-SUGGESTIONS.json');
+// Phase 2.3: update-status.json lives under SILO_DIR (the data dir) NOT
+// SILO_BASE (the projection target). Pinned to SILO_DIR per spec §3.4 +
+// round-1 ChatGPT F2 fix — the MCP server was previously reading from the
+// projection target by default, which the CLI never writes.
+const UPDATE_STATUS_PATH = join(SILO_DIR, 'update-status.json');
 const HANDOFF_DIR = join(SILO_BASE, 'handoff/cc-to-jarvis');
 const HANDOFF_PROCESSED_DIR = join(HANDOFF_DIR, 'processed');
 
@@ -162,11 +172,17 @@ function todayStr() {
   return brt.toISOString().slice(0, 10);
 }
 
-// Shared notice builder for read_index / search / list_handoffs. Phase 2.3
-// will pass updateStatus when its cache file exists; for Phase 2.2 only
-// pending_topic_suggestions can fire.
+// Shared notice builder for read_index / search / list_handoffs. Phase 2.2
+// contributes pending_topic_suggestions; Phase 2.3 adds update_available /
+// update_check_unhealthy when update-status.json is present AND
+// SILO_DISABLE_UPDATE_CHECK is not set (spec §3.6 / §5).
 async function siloNoticesForRead() {
-  return buildSiloNotices({ pendingPath: PENDING_SUGGESTIONS_PATH });
+  const updateStatus = await loadUpdateStatus(UPDATE_STATUS_PATH);
+  return buildSiloNotices({
+    pendingPath: PENDING_SUGGESTIONS_PATH,
+    updateStatus,
+    updateCheckDisabled: isUpdateOptOut(),
+  });
 }
 
 /** Spawn `silo regenerate` after a successful accept/dismiss. Returns bool. */
