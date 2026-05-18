@@ -15,6 +15,7 @@ import { join, dirname } from 'node:path';
 import { regenerateAllTopicFiles } from './regenerate-topic-file.js';
 import { regenerateTopicIndex } from './regenerate-topic-index.js';
 import { regenerateAllEventLogs } from './regenerate-event-log.js';
+import { buildPendingSuggestionsEnvelope } from './regenerate-pending-suggestions.js';
 
 /**
  * Atomic write: write to <path>.tmp then rename over <path>.
@@ -54,9 +55,17 @@ export async function regenerateProjections({ logReader, state, targetDir }) {
     await atomicWrite(path, text);
   }
 
+  // 4. PENDING-SUGGESTIONS.json (Phase 2.2 §6)
+  const envelope = buildPendingSuggestionsEnvelope(state);
+  await atomicWrite(
+    join(targetDir, 'PENDING-SUGGESTIONS.json'),
+    JSON.stringify(envelope, null, 2) + '\n',
+  );
+
   return {
     topics: topicFiles.size,
     event_logs: eventLogs.size,
+    pending_suggestions: envelope.count,
     target: targetDir,
   };
 }
@@ -65,3 +74,4 @@ export async function regenerateProjections({ logReader, state, targetDir }) {
 export { regenerateTopicFile, regenerateAllTopicFiles } from './regenerate-topic-file.js';
 export { regenerateTopicIndex } from './regenerate-topic-index.js';
 export { regenerateEventLogForDate, regenerateAllEventLogs } from './regenerate-event-log.js';
+export { buildPendingSuggestionsEnvelope } from './regenerate-pending-suggestions.js';
