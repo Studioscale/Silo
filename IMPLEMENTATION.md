@@ -61,6 +61,13 @@ src/
     silo.js               Single binary: init, status, write, read, search,
                           import-jarvis, extract, curate, regenerate
 
+silo-mcp/               # MCP bridge — Streamable HTTP + bearer-token auth
+  server.js               Tools: read_index, get_topic, read_events, search,
+                          list_handoffs, write_event, write_handoff
+                          (Phase 2.2 will add list_pending_suggestions,
+                          accept_suggestion, dismiss_suggestion + _silo_notices.)
+  setup-as-root.sh        VPS bootstrap (systemd unit + token)
+
 test/                   # 129 unit + integration tests (node:test)
   fixtures/                Real-corpus parity fixtures
   *.test.js                One per module
