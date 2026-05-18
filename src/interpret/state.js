@@ -24,6 +24,29 @@ export function newState() {
     dedup_witness_set: new Map(), // intent_id -> { seq, principal, op, payload_hash }
     topic_content: new Map(), // slug -> array of event summaries (for M1 simple reads)
     retired_curated_seqs: new Set(), // seq numbers of CURATED write_events superseded by TOPIC_BULLETS_RETIRED
+
+    // ── Phase 2.2 topic-proposal slots (§3) ─────────────────────────────────
+    // Map<seq, {seq, slug, name, description, supporting_seqs, rationale, ts,
+    //          source, status: 'pending'|'accepted'|'dismissed',
+    //          resolved_at, resolved_by_seq, accepted_slug}>
+    topic_suggestions: new Map(),
+    // Set<seq>
+    pending_topic_suggestion_seqs: new Set(),
+    // Map<accepted_slug, suggestion_seq> — for bootstrap (raw slug → suggestion seq).
+    accepted_topic_suggestion_by_slug: new Map(),
+    // Map<normalized_slug, Array<{suggestion_seq, source_dismissal_seq,
+    //   dismissed_at, cooldown_days, until_ts, support_fingerprint,
+    //   reason, cleared_by_accept_seq}>>
+    // Append-only history; one entry per (dismissal, suggestion_seq) pair.
+    dismissed_topic_suggestion_history: new Map(),
+    // DERIVED VIEW: computed during interpret() finalization from history.
+    // Map<normalized_slug, {source_dismissal_seq, until_ts, cleared_by_accept_seq}>
+    cooldowns_by_normalized_slug: new Map(),
+    // Map<seq, {slug, tag, content, ts, source, principal}> — every write_event,
+    // by seq, for cross-slug accept-time semantic re-validation + bootstrap
+    // event lookup.
+    seq_to_event: new Map(),
+
     last_seq: 0,
     tail_hash: null,
     skipped: [], // [{ seq, reason }]
@@ -53,6 +76,10 @@ export function stateToJson(state) {
     ),
     dedup_witness_size: state.dedup_witness_set.size,
     retired_curated_seqs: [...state.retired_curated_seqs].sort((a, b) => a - b),
+    // Phase 2.2: surface counts only (full maps stay opaque to debug output).
+    topic_suggestions_total: state.topic_suggestions.size,
+    pending_topic_suggestion_count: state.pending_topic_suggestion_seqs.size,
+    active_cooldown_count: state.cooldowns_by_normalized_slug.size,
     last_seq: state.last_seq,
     tail_hash: state.tail_hash,
     skipped: state.skipped,

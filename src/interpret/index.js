@@ -18,6 +18,8 @@
 
 import { newState } from './state.js';
 import { canonicalHash, nfcNormalize } from '../log/canonical.js';
+import { normalizeSlugKey } from '../admission/slug.js';
+import { computeSupportFingerprint } from '../util/support-fingerprint.js';
 import canonicalize from 'canonicalize';
 
 const DEDUP_WINDOW = 100_000; // v12.5 §8.5 — last 100k entries
@@ -59,6 +61,27 @@ export async function interpret(logReader, matrix = null, asOfSeq = Infinity) {
 
     state.last_seq = entry.seq;
     state.tail_hash = canonicalHash(entry);
+  }
+
+  // Phase 2.2 finalization (§4.5): derive cooldowns_by_normalized_slug from
+  // dismissed history. Pure, replay-safe — no wall-clock. Picks the strongest
+  // (max-until_ts) UNCLEARED record per normalized slug. Cleared entries are
+  // excluded by the loop, so cleared_by_accept_seq is always null in the
+  // derived view.
+  state.cooldowns_by_normalized_slug = new Map();
+  for (const [normalizedSlug, history] of state.dismissed_topic_suggestion_history.entries()) {
+    let strongest = null;
+    for (const record of history) {
+      if (record.cleared_by_accept_seq != null) continue;
+      if (!strongest || record.until_ts > strongest.until_ts) strongest = record;
+    }
+    if (strongest) {
+      state.cooldowns_by_normalized_slug.set(normalizedSlug, {
+        source_dismissal_seq: strongest.source_dismissal_seq,
+        until_ts: strongest.until_ts,
+        cleared_by_accept_seq: null,
+      });
+    }
   }
 
   return state;
@@ -243,6 +266,20 @@ function applyEntry(state, entry) {
       break;
     }
 
+    // ── Phase 2.2: topic-proposal lifecycle (§4.1 - §4.3) ───────────────
+    case 'TOPIC_SUGGESTED': {
+      applyTopicSuggested(state, entry);
+      break;
+    }
+    case 'TOPIC_SUGGESTION_ACCEPTED': {
+      applyTopicSuggestionAccepted(state, entry);
+      break;
+    }
+    case 'TOPIC_SUGGESTION_DISMISSED': {
+      applyTopicSuggestionDismissed(state, entry);
+      break;
+    }
+
     case 'TOPIC_METADATA_SET': {
       const { topic, type, tags, entities, status, sensitivity, created, summary, summary_trailing_blank } = entry.payload;
       if (!topic) break;
@@ -345,6 +382,115 @@ function applyWriteEvent(state, entry) {
     ts: entry.ts,
   });
   state.topic_content.set(slug, history);
+
+  // Phase 2.2 §4.4: cross-slug index of every write_event by seq. Used by
+  // accept_suggestion to re-validate that each supporting_seq references a
+  // real write_event on a scan-eligible slug + by bootstrap-curate to
+  // fetch event content during topic onboarding.
+  state.seq_to_event.set(entry.seq, {
+    slug,
+    tag: tag || null,
+    content: typeof content === 'string' ? content : JSON.stringify(content),
+    ts: entry.ts,
+    source: entry.payload?.source ?? null,
+    principal: entry.principal,
+  });
+}
+
+// ── Phase 2.2 topic-proposal handlers (§4.1 - §4.3) ─────────────────────────
+
+function applyTopicSuggested(state, entry) {
+  const p = entry.payload || {};
+  state.topic_suggestions.set(entry.seq, {
+    seq: entry.seq,
+    slug: p.slug,
+    name: p.name,
+    description: p.description,
+    supporting_seqs: Array.isArray(p.supporting_seqs) ? [...p.supporting_seqs] : [],
+    rationale: p.rationale,
+    ts: entry.ts,
+    source: p.source ?? null,
+    status: 'pending',
+    resolved_at: null,
+    resolved_by_seq: null,
+    accepted_slug: null,
+  });
+  state.pending_topic_suggestion_seqs.add(entry.seq);
+}
+
+function applyTopicSuggestionAccepted(state, entry) {
+  const suggestionSeq = entry.payload?.suggestion_seq;
+  const acceptSeq = entry.seq;
+  const acceptedSlug = entry.payload?.accepted_slug;
+
+  const suggestion = state.topic_suggestions.get(suggestionSeq);
+  if (!suggestion || suggestion.status !== 'pending') {
+    state.skipped.push({
+      seq: acceptSeq,
+      reason: 'suggestion_seq_not_pending',
+      suggestion_seq: suggestionSeq,
+    });
+    return;
+  }
+
+  suggestion.status = 'accepted';
+  suggestion.resolved_at = entry.ts;
+  suggestion.resolved_by_seq = acceptSeq;
+  suggestion.accepted_slug = acceptedSlug;
+  state.pending_topic_suggestion_seqs.delete(suggestionSeq);
+  state.accepted_topic_suggestion_by_slug.set(acceptedSlug, suggestionSeq);
+
+  // Causal-precision: each prior dismissal of the same normalized slug is
+  // cleared by the FIRST accept whose seq is strictly greater than the
+  // dismissal's source seq. Idempotent — re-running this loop on a future
+  // accept (different normalized slug) leaves these stamps alone.
+  const normalized = normalizeSlugKey(acceptedSlug);
+  const history = state.dismissed_topic_suggestion_history.get(normalized);
+  if (history) {
+    for (const record of history) {
+      if (record.cleared_by_accept_seq != null) continue;
+      if (acceptSeq > record.source_dismissal_seq) {
+        record.cleared_by_accept_seq = acceptSeq;
+      }
+    }
+  }
+}
+
+function applyTopicSuggestionDismissed(state, entry) {
+  const p = entry.payload || {};
+  const seqs = Array.isArray(p.suggestion_seqs) ? p.suggestion_seqs : [];
+  // entry.ts is ISO 8601 string; ts_ms derived once per dismissal event for
+  // cooldown math. Pure — no wall-clock involved.
+  const tsMs = Date.parse(entry.ts);
+  for (const sugSeq of seqs) {
+    const suggestion = state.topic_suggestions.get(sugSeq);
+    if (!suggestion || suggestion.status !== 'pending') {
+      state.skipped.push({
+        seq: entry.seq,
+        reason: 'suggestion_seq_not_pending',
+        suggestion_seq: sugSeq,
+      });
+      continue;
+    }
+    suggestion.status = 'dismissed';
+    suggestion.resolved_at = entry.ts;
+    suggestion.resolved_by_seq = entry.seq;
+    state.pending_topic_suggestion_seqs.delete(sugSeq);
+
+    const normalized = normalizeSlugKey(suggestion.slug);
+    const history = state.dismissed_topic_suggestion_history.get(normalized) ?? [];
+    history.push({
+      suggestion_seq: sugSeq,
+      source_dismissal_seq: entry.seq,
+      dismissed_at: entry.ts,
+      cooldown_days: p.cooldown_days,
+      until_ts: tsMs + p.cooldown_days * 86400000,
+      support_fingerprint: computeSupportFingerprint(suggestion.supporting_seqs),
+      reason: p.reason ?? null,
+      cleared_by_accept_seq: null,
+    });
+    state.dismissed_topic_suggestion_history.set(normalized, history);
+  }
 }
 
 /**
