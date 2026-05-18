@@ -153,6 +153,24 @@ until expiry.
 <seq> | --status | --bulk-scan` covers the same surface from the CLI
 without needing MCP.
 
+## Update notifications (Phase 2.3)
+
+Silo polls GitHub Releases once per 24h (per deployment, throttled via
+`<silo-dir>/update-status.json`) and surfaces the result the same way
+topic suggestions are surfaced — as `kind: "update_available"` entries
+in the MCP `_silo_notices` array. The check fires from a detached child
+process at the top of every non-`silo doctor` CLI invocation so the
+host command never waits on network I/O. Health failures surface as
+`kind: "update_check_unhealthy"` after 7 consecutive failures (or
+immediately on a 404). Opt out by setting `SILO_DISABLE_UPDATE_CHECK=1`
+in the environment — this disables both the outbound fetch and the
+inbound notice surfacing.
+
+`silo doctor` prints local version + cached check status + operation-
+log tail + cache-file diagnostics. `silo doctor --check-updates` forces
+a fresh fetch synchronously; `--force` overrides opt-out for that
+single invocation.
+
 ## Architecture deep dive
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — Full system design
