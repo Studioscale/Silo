@@ -208,10 +208,13 @@ test('maybeFireUpdateCheck: fresh cache → no spawn (returns false)', async () 
     last_checked_at: new Date(now - 1000).toISOString(),
     consecutive_failures: 0,
   });
-  // Worker path doesn't matter — must not be invoked.
+  // Worker path doesn't matter — must not be invoked. Pass env: {} so any
+  // ambient SILO_DISABLE_UPDATE_CHECK from the test runner doesn't taint
+  // the throttle assertion.
   const fired = await maybeFireUpdateCheck(dir, {
     now,
     workerPath: '/nonexistent/path',
+    env: {},
   });
   assert.equal(fired, false);
 });
@@ -225,7 +228,7 @@ test('maybeFireUpdateCheck: stale cache → spawn (returns true)', async () => {
   });
   const echoScript = join(dir, 'echo.js');
   await fs.writeFile(echoScript, 'process.exit(0);');
-  const fired = await maybeFireUpdateCheck(dir, { now, workerPath: echoScript });
+  const fired = await maybeFireUpdateCheck(dir, { now, workerPath: echoScript, env: {} });
   assert.equal(fired, true);
 });
 
@@ -248,7 +251,7 @@ test('maybeFireUpdateCheck: missing cache → spawn (first run)', async () => {
   const dir = await freshSiloDir();
   const echoScript = join(dir, 'echo.js');
   await fs.writeFile(echoScript, 'process.exit(0);');
-  const fired = await maybeFireUpdateCheck(dir, { workerPath: echoScript });
+  const fired = await maybeFireUpdateCheck(dir, { workerPath: echoScript, env: {} });
   assert.equal(fired, true);
 });
 

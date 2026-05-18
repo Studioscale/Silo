@@ -28,7 +28,7 @@
 
 import { parseArgs } from 'node:util';
 import { promises as fs } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
 import { LogWriter } from '../log/append.js';
 import { interpret } from '../interpret/index.js';
@@ -53,6 +53,16 @@ import {
   dismissSuggestions,
   SuggestionOpError,
 } from '../topic-proposal/suggestion-ops.js';
+import {
+  isOptOut as isUpdateOptOut,
+  maybeFireUpdateCheck,
+  performCheck,
+  readCache as readUpdateCache,
+  writeCache as writeUpdateCache,
+  CURRENT_VERSION as SILO_VERSION,
+  CACHE_FILENAME as UPDATE_CACHE_FILENAME,
+  HEALTHY_FAILURE_THRESHOLD,
+} from '../util/update-check.js';
 
 // Defaults can be overridden by env vars (standard CLI pattern: KUBECONFIG,
 // AWS_PROFILE, EDITOR, etc.) so users don't have to pass --silo-dir and
@@ -984,6 +994,110 @@ async function cmdSuggest(values) {
   }
 }
 
+// ── silo doctor — Phase 2.3 §4 ───────────────────────────────────────────────
+
+async function cmdDoctor(values) {
+  const siloDir = values['silo-dir'];
+  const checkUpdates = !!values['check-updates'];
+  const force = !!values.force;
+  const optedOut = isUpdateOptOut();
+
+  console.log(`Silo v${SILO_VERSION}`);
+  console.log('');
+
+  if (checkUpdates) {
+    if (optedOut && !force) {
+      console.log('Update check skipped — SILO_DISABLE_UPDATE_CHECK is set.');
+      console.log('Pass --force to override and run the check anyway.');
+      console.log('');
+    } else {
+      console.log('Forcing fresh update check...');
+      try {
+        const prior = await readUpdateCache(siloDir);
+        const status = await performCheck({ prior });
+        await writeUpdateCache(siloDir, status);
+        console.log(`  Status: ${status.last_check_status}`);
+        if (status.last_check_status === 'ok') {
+          console.log(`  Latest available: v${status.latest_version}`);
+          if (status.update_available) {
+            console.log(`  → Upgrade: run \`git pull && npm install\` in this repo's clone`);
+          } else {
+            console.log('  No upgrade needed.');
+          }
+        } else {
+          console.log(`  Last error: ${status.last_error}`);
+          console.log(`  Consecutive failures: ${status.consecutive_failures}`);
+        }
+        console.log('');
+      } catch (err) {
+        console.log(`  Check failed: ${err.message}`);
+        console.log('');
+      }
+    }
+  }
+
+  // Cached status report — always shown, even when checks are disabled.
+  const cache = await readUpdateCache(siloDir);
+  if (optedOut) {
+    console.log('Update checks are disabled (SILO_DISABLE_UPDATE_CHECK is set).');
+  }
+  if (cache) {
+    console.log(`Update check: last ran ${formatTs(cache.last_checked_at)}`);
+    console.log(`  Status: ${cache.last_check_status}` + (cache.last_error ? ` (${cache.last_error})` : ''));
+    if (cache.last_check_status === 'ok') {
+      console.log(`  Latest available: v${cache.latest_version}${cache.released_at ? ` (released ${cache.released_at.slice(0, 10)})` : ''}`);
+      if (cache.update_available) {
+        console.log('  Upgrade: run `git pull && npm install` in this repo\'s clone');
+      } else {
+        console.log('  No upgrade needed.');
+      }
+    } else {
+      console.log(`  Consecutive failures: ${cache.consecutive_failures}`);
+      if (cache.last_successful_check_at) {
+        console.log(`  Last successful check: ${formatTs(cache.last_successful_check_at)} (saw v${cache.last_successful_latest_version} as latest)`);
+      }
+      if (cache.consecutive_failures >= HEALTHY_FAILURE_THRESHOLD || cache.last_check_status === 'repo_not_found') {
+        console.log('  Retry: run `silo doctor --check-updates` to force a fresh check.');
+      }
+    }
+  } else {
+    console.log('Update check: no cache yet.');
+    if (!optedOut) {
+      console.log('  Next non-doctor command will fire a check automatically (24h throttle).');
+    }
+  }
+  console.log('');
+
+  // Operation log summary.
+  console.log(`Operation log: ${join(siloDir, 'operation-log')}/`);
+  try {
+    const writer = await openWriter(siloDir);
+    const tail = writer.tail();
+    console.log(`  Last seq: ${tail.seq}`);
+    if (tail.seq > 0) {
+      const state = await interpret(writer);
+      const lastEntry = state.seq_to_event.get(tail.seq);
+      if (lastEntry?.ts) console.log(`  Last write: ${formatTs(lastEntry.ts)}`);
+    }
+  } catch (err) {
+    console.log(`  Read failed: ${err.message}`);
+  }
+  console.log('');
+
+  // Cache file diagnostics.
+  console.log(`Cache file: ${join(siloDir, UPDATE_CACHE_FILENAME)}`);
+  console.log(`  Exists: ${cache ? 'yes' : 'no'}`);
+  if (cache?.last_checked_at) {
+    console.log(`  Last update: ${formatTs(cache.last_checked_at)}`);
+  }
+}
+
+function formatTs(iso) {
+  if (!iso) return '(never)';
+  // Display as "YYYY-MM-DD HH:MM UTC" for readability.
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
 async function cmdRegenerate({ 'silo-dir': siloDir, to }) {
   if (!to) {
     console.error('silo regenerate: --to <target-dir> required (e.g., /root/clawd-v3)');
@@ -1059,10 +1173,24 @@ async function main() {
     tags: { type: 'string' },
     'scan-slugs': { type: 'string' },
     'run-id': { type: 'string' },
+    // Phase 2.3 doctor flags
+    'check-updates': { type: 'boolean', default: false },
+    force: { type: 'boolean', default: false },
   };
   const { values } = parseArgs({ args: argv, options, strict: false, allowPositionals: true });
 
   if (positionalQuery && !values.query) values.query = positionalQuery;
+
+  // Phase 2.3 §4.3: every CLI command except `silo doctor` fires a detached
+  // update-check worker on entry. Spawn is non-blocking — survives this
+  // process exiting in <100ms. Respects opt-out + 24h throttle internally.
+  if (command !== 'doctor' && command !== 'help' && command !== 'init') {
+    try {
+      await maybeFireUpdateCheck(values['silo-dir']);
+    } catch {
+      // Update check is best-effort; never block the real command.
+    }
+  }
 
   try {
     switch (command) {
@@ -1096,6 +1224,9 @@ async function main() {
       case 'suggest':
         await cmdSuggest(values);
         break;
+      case 'doctor':
+        await cmdDoctor(values);
+        break;
       default:
         console.error(`silo: unknown command "${command}"`);
         printHelp();
@@ -1123,6 +1254,8 @@ commands:
   curate      promote events to Layer 2 (auto-bootstraps accepted suggestions)
   suggest     topic-proposal admin: --run-now | --list | --accept <seq>
               --dismiss <seq> | --status | --bulk-scan
+  doctor      diagnostic readout; --check-updates forces a fresh GitHub check
+              (honors SILO_DISABLE_UPDATE_CHECK; --force overrides)
   regenerate  rebuild Zone B projections (topic files, event logs,
               TOPIC-INDEX.md, PENDING-SUGGESTIONS.json) from the log
 
