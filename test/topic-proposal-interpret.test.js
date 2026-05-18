@@ -41,6 +41,27 @@ function suggestedPayload({ slug, name, description, supporting_seqs, rationale,
   return payload;
 }
 
+/**
+ * Seed N write_events under `general` so subsequent TOPIC_SUGGESTED events
+ * can reference real prior seqs. Returns the array of seqs seeded.
+ */
+async function seedGeneralEvents(writer, n, { tsBase = '2026-04-10T10:00:00Z' } = {}) {
+  const seqs = [];
+  const baseMs = Date.parse(tsBase);
+  for (let i = 0; i < n; i++) {
+    const r = await writer.append({
+      type: 'write_event',
+      isStateBearing: true,
+      intentId: `intent:seed-${i}`,
+      principal: 'helder',
+      payload: { slug: 'general', tag: 'FACT', content: `seed event ${i}` },
+      ts: new Date(baseMs + i * 1000).toISOString(),
+    });
+    seqs.push(r.seq);
+  }
+  return seqs;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 test('normalizeSlugKey: pets / Pets / pet-s / PETS all normalize to pets', () => {
@@ -150,7 +171,8 @@ test('write_event fold: seq_to_event.source is null when payload lacks source', 
 
 test('TOPIC_SUGGESTED: lands as pending, status defaults populated', async () => {
   const { writer } = await freshSilo();
-  await writer.append({
+  const seeds = await seedGeneralEvents(writer, 5);
+  const r = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:sug',
@@ -159,14 +181,14 @@ test('TOPIC_SUGGESTED: lands as pending, status defaults populated', async () =>
       slug: 'pets',
       name: 'Pets',
       description: 'Health, training, routine for pets',
-      supporting_seqs: [1, 2, 3, 4, 5],
+      supporting_seqs: seeds,
       rationale: '5 events about a dog Rover',
       source: 'silo-topic-detector',
     }),
     ts: '2026-04-22T10:00:00Z',
   });
   const state = await interpret(writer);
-  const s = state.topic_suggestions.get(1);
+  const s = state.topic_suggestions.get(r.seq);
   assert.ok(s);
   assert.equal(s.status, 'pending');
   assert.equal(s.slug, 'pets');
@@ -174,16 +196,16 @@ test('TOPIC_SUGGESTED: lands as pending, status defaults populated', async () =>
   assert.equal(s.resolved_at, null);
   assert.equal(s.resolved_by_seq, null);
   assert.equal(s.accepted_slug, null);
-  assert.deepEqual(s.supporting_seqs, [1, 2, 3, 4, 5]);
-  assert.ok(state.pending_topic_suggestion_seqs.has(1));
+  assert.deepEqual(s.supporting_seqs, seeds);
+  assert.ok(state.pending_topic_suggestion_seqs.has(r.seq));
 });
 
 // ── TOPIC_SUGGESTION_ACCEPTED handler ────────────────────────────────────────
 
 test('ACCEPTED: transitions pending → accepted; updates bootstrap index', async () => {
   const { writer } = await freshSilo();
-  // seq 1: TOPIC_SUGGESTED
-  await writer.append({
+  const seeds = await seedGeneralEvents(writer, 3);
+  const sug = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:sug',
@@ -192,33 +214,33 @@ test('ACCEPTED: transitions pending → accepted; updates bootstrap index', asyn
       slug: 'pets',
       name: 'Pets',
       description: 'Health and routine',
-      supporting_seqs: [10, 11, 12],
+      supporting_seqs: seeds,
       rationale: 'three events',
     }),
     ts: '2026-04-22T10:00:00Z',
   });
-  // seq 2: ACCEPTED
-  await writer.append({
+  const acc = await writer.append({
     type: 'TOPIC_SUGGESTION_ACCEPTED',
     isStateBearing: true,
     intentId: 'intent:acc',
     principal: 'operator',
-    payload: { suggestion_seq: 1, accepted_slug: 'pets' },
+    payload: { suggestion_seq: sug.seq, accepted_slug: 'pets' },
     ts: '2026-04-23T11:00:00Z',
   });
   const state = await interpret(writer);
-  const s = state.topic_suggestions.get(1);
+  const s = state.topic_suggestions.get(sug.seq);
   assert.equal(s.status, 'accepted');
-  assert.equal(s.resolved_by_seq, 2);
+  assert.equal(s.resolved_by_seq, acc.seq);
   assert.equal(s.resolved_at, '2026-04-23T11:00:00Z');
   assert.equal(s.accepted_slug, 'pets');
-  assert.equal(state.pending_topic_suggestion_seqs.has(1), false);
-  assert.equal(state.accepted_topic_suggestion_by_slug.get('pets'), 1);
+  assert.equal(state.pending_topic_suggestion_seqs.has(sug.seq), false);
+  assert.equal(state.accepted_topic_suggestion_by_slug.get('pets'), sug.seq);
 });
 
 test('ACCEPTED: idempotent on non-pending suggestion → skipped[] entry', async () => {
   const { writer } = await freshSilo();
-  await writer.append({
+  const seeds = await seedGeneralEvents(writer, 1);
+  const sug = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:sug',
@@ -227,7 +249,7 @@ test('ACCEPTED: idempotent on non-pending suggestion → skipped[] entry', async
       slug: 'pets',
       name: 'Pets',
       description: 'Routine',
-      supporting_seqs: [10],
+      supporting_seqs: seeds,
       rationale: 'one',
     }),
     ts: '2026-04-22T10:00:00Z',
@@ -237,7 +259,7 @@ test('ACCEPTED: idempotent on non-pending suggestion → skipped[] entry', async
     isStateBearing: true,
     intentId: 'intent:acc1',
     principal: 'operator',
-    payload: { suggestion_seq: 1, accepted_slug: 'pets' },
+    payload: { suggestion_seq: sug.seq, accepted_slug: 'pets' },
     ts: '2026-04-23T11:00:00Z',
   });
   // Replay of acceptance on same suggestion_seq — should land in skipped[]
@@ -246,21 +268,21 @@ test('ACCEPTED: idempotent on non-pending suggestion → skipped[] entry', async
     isStateBearing: true,
     intentId: 'intent:acc2',
     principal: 'operator',
-    payload: { suggestion_seq: 1, accepted_slug: 'pets' },
+    payload: { suggestion_seq: sug.seq, accepted_slug: 'pets' },
     ts: '2026-04-23T11:00:01Z',
   });
   const state = await interpret(writer);
   const skips = state.skipped.filter((s) => s.reason === 'suggestion_seq_not_pending');
   assert.equal(skips.length, 1);
-  assert.equal(skips[0].suggestion_seq, 1);
+  assert.equal(skips[0].suggestion_seq, sug.seq);
 });
 
 // ── TOPIC_SUGGESTION_DISMISSED handler + cooldown finalization ───────────────
 
 test('DISMISSED: batch dismiss appends one history entry per seq', async () => {
   const { writer } = await freshSilo();
-  // seq 1, 2: two TOPIC_SUGGESTED with different slugs
-  await writer.append({
+  const seeds = await seedGeneralEvents(writer, 4);
+  const s1 = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:s1',
@@ -269,12 +291,12 @@ test('DISMISSED: batch dismiss appends one history entry per seq', async () => {
       slug: 'pets',
       name: 'Pets',
       description: 'pet care',
-      supporting_seqs: [100, 101, 102],
+      supporting_seqs: seeds.slice(0, 3),
       rationale: '...',
     }),
     ts: '2026-04-22T10:00:00Z',
   });
-  await writer.append({
+  const s2 = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:s2',
@@ -283,27 +305,26 @@ test('DISMISSED: batch dismiss appends one history entry per seq', async () => {
       slug: 'plants',
       name: 'Plants',
       description: 'gardening',
-      supporting_seqs: [200, 201],
+      supporting_seqs: [seeds[3]],
       rationale: '...',
     }),
     ts: '2026-04-22T10:00:01Z',
   });
-  // seq 3: DISMISSED both at once with 90d cooldown
-  await writer.append({
+  const d = await writer.append({
     type: 'TOPIC_SUGGESTION_DISMISSED',
     isStateBearing: true,
     intentId: 'intent:d',
     principal: 'operator',
     payload: {
-      suggestion_seqs: [1, 2],
+      suggestion_seqs: [s1.seq, s2.seq].sort((a, b) => a - b),
       cooldown_days: 90,
       reason: 'not interested yet',
     },
     ts: '2026-04-22T10:00:02Z',
   });
   const state = await interpret(writer);
-  assert.equal(state.topic_suggestions.get(1).status, 'dismissed');
-  assert.equal(state.topic_suggestions.get(2).status, 'dismissed');
+  assert.equal(state.topic_suggestions.get(s1.seq).status, 'dismissed');
+  assert.equal(state.topic_suggestions.get(s2.seq).status, 'dismissed');
   assert.equal(state.pending_topic_suggestion_seqs.size, 0);
 
   const petsHistory = state.dismissed_topic_suggestion_history.get('pets');
@@ -312,15 +333,15 @@ test('DISMISSED: batch dismiss appends one history entry per seq', async () => {
   assert.equal(plantsHistory.length, 1);
   assert.equal(petsHistory[0].cooldown_days, 90);
   assert.equal(petsHistory[0].reason, 'not interested yet');
-  assert.equal(petsHistory[0].source_dismissal_seq, 3);
+  assert.equal(petsHistory[0].source_dismissal_seq, d.seq);
 });
 
 test('finalization: cooldowns_by_normalized_slug uses MAX until_ts uncleared', async () => {
   const { writer } = await freshSilo();
   // Acceptance-criterion §14 scenario: dismiss `pets` 365d, dismiss `pet-s` 1d.
   // Both normalize to "pets"; max until_ts wins.
-  // seq 1, 2: two suggestions
-  await writer.append({
+  const seeds = await seedGeneralEvents(writer, 2);
+  const s1 = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:s1',
@@ -329,12 +350,12 @@ test('finalization: cooldowns_by_normalized_slug uses MAX until_ts uncleared', a
       slug: 'pets',
       name: 'Pets',
       description: 'pet care',
-      supporting_seqs: [100],
+      supporting_seqs: [seeds[0]],
       rationale: '...',
     }),
     ts: '2026-04-22T10:00:00Z',
   });
-  await writer.append({
+  const s2 = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:s2',
@@ -343,47 +364,44 @@ test('finalization: cooldowns_by_normalized_slug uses MAX until_ts uncleared', a
       slug: 'pet-s',
       name: 'Pets',
       description: 'pet care alt slug',
-      supporting_seqs: [200],
+      supporting_seqs: [seeds[1]],
       rationale: '...',
     }),
     ts: '2026-04-22T10:00:01Z',
   });
-  // seq 3: dismiss "pets" with 365d
-  await writer.append({
+  const d1 = await writer.append({
     type: 'TOPIC_SUGGESTION_DISMISSED',
     isStateBearing: true,
     intentId: 'intent:d1',
     principal: 'operator',
-    payload: { suggestion_seqs: [1], cooldown_days: 365 },
+    payload: { suggestion_seqs: [s1.seq], cooldown_days: 365 },
     ts: '2026-04-22T10:00:02Z',
   });
-  // seq 4: dismiss "pet-s" with 1d
   await writer.append({
     type: 'TOPIC_SUGGESTION_DISMISSED',
     isStateBearing: true,
     intentId: 'intent:d2',
     principal: 'operator',
-    payload: { suggestion_seqs: [2], cooldown_days: 1 },
+    payload: { suggestion_seqs: [s2.seq], cooldown_days: 1 },
     ts: '2026-04-22T10:00:03Z',
   });
 
   const state = await interpret(writer);
   const cd = state.cooldowns_by_normalized_slug.get('pets');
   assert.ok(cd);
-  // 365d wins over 1d.
   const expectedUntil = Date.parse('2026-04-22T10:00:02Z') + 365 * 86400000;
   assert.equal(cd.until_ts, expectedUntil);
-  assert.equal(cd.source_dismissal_seq, 3);
+  assert.equal(cd.source_dismissal_seq, d1.seq);
   assert.equal(cd.cleared_by_accept_seq, null);
 });
 
 test('finalization: accept clears prior dismissal (cleared_by_accept_seq stamped)', async () => {
   const { writer } = await freshSilo();
   // Scenario: dismiss "pets" with cooldown. Later, accept a SECOND "pets"
-  // suggestion. The first dismissal should be cleared by the accept seq —
+  // suggestion. The first dismissal should be cleared by the ACCEPT seq —
   // not the suggestion_seq — per spec §4.2 "causal precision".
-  // seq 1: TOPIC_SUGGESTED pets
-  await writer.append({
+  const seedA = await seedGeneralEvents(writer, 1, { tsBase: '2026-04-01T10:00:00Z' });
+  const s1 = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:s1',
@@ -392,23 +410,21 @@ test('finalization: accept clears prior dismissal (cleared_by_accept_seq stamped
       slug: 'pets',
       name: 'Pets',
       description: 'first attempt',
-      supporting_seqs: [100],
+      supporting_seqs: seedA,
       rationale: '...',
     }),
     ts: '2026-04-22T10:00:00Z',
   });
-  // seq 2: DISMISSED [1] 90d
   await writer.append({
     type: 'TOPIC_SUGGESTION_DISMISSED',
     isStateBearing: true,
     intentId: 'intent:d',
     principal: 'operator',
-    payload: { suggestion_seqs: [1], cooldown_days: 90 },
+    payload: { suggestion_seqs: [s1.seq], cooldown_days: 90 },
     ts: '2026-04-22T10:00:01Z',
   });
-  // seq 3: SECOND TOPIC_SUGGESTED pets (different evidence set, post-cooldown
-  //        or via manual operator override)
-  await writer.append({
+  const seedB = await seedGeneralEvents(writer, 1, { tsBase: '2026-06-01T10:00:00Z' });
+  const s2 = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:s2',
@@ -417,27 +433,24 @@ test('finalization: accept clears prior dismissal (cleared_by_accept_seq stamped
       slug: 'pets',
       name: 'Pets',
       description: 'second attempt',
-      supporting_seqs: [200],
+      supporting_seqs: seedB,
       rationale: '...',
     }),
     ts: '2026-06-22T10:00:00Z',
   });
-  // seq 4: ACCEPTED [3] as "pets"
-  await writer.append({
+  const a = await writer.append({
     type: 'TOPIC_SUGGESTION_ACCEPTED',
     isStateBearing: true,
     intentId: 'intent:a',
     principal: 'operator',
-    payload: { suggestion_seq: 3, accepted_slug: 'pets' },
+    payload: { suggestion_seq: s2.seq, accepted_slug: 'pets' },
     ts: '2026-06-22T10:00:01Z',
   });
 
   const state = await interpret(writer);
   const history = state.dismissed_topic_suggestion_history.get('pets');
   assert.equal(history.length, 1);
-  // Stamped with ACCEPT seq (4), not suggestion_seq (3).
-  assert.equal(history[0].cleared_by_accept_seq, 4);
-  // Derived view excludes cleared dismissals — no cooldown should remain.
+  assert.equal(history[0].cleared_by_accept_seq, a.seq);
   assert.equal(state.cooldowns_by_normalized_slug.has('pets'), false);
 });
 
@@ -445,10 +458,9 @@ test('finalization: cleared dismissal does NOT contribute to active cooldown', a
   const { writer } = await freshSilo();
   // Two dismissals for "pets". First gets cleared by an intervening accept;
   // second is still active. Finalization picks the still-active one.
-  // 1: SUGGESTED, 2: DISMISSED, 3: SUGGESTED, 4: ACCEPTED (clears #2),
-  // 5: SUGGESTED, 6: DISMISSED (active).
-  const seqOf = async (entry) => (await writer.append(entry)).seq;
-  await seqOf({
+
+  const seedA = await seedGeneralEvents(writer, 1, { tsBase: '2026-04-01T10:00:00Z' });
+  const s1 = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:s1',
@@ -457,20 +469,21 @@ test('finalization: cleared dismissal does NOT contribute to active cooldown', a
       slug: 'pets',
       name: 'Pets',
       description: 'a',
-      supporting_seqs: [100],
+      supporting_seqs: seedA,
       rationale: '...',
     }),
     ts: '2026-04-22T10:00:00Z',
   });
-  await seqOf({
+  await writer.append({
     type: 'TOPIC_SUGGESTION_DISMISSED',
     isStateBearing: true,
     intentId: 'intent:d1',
     principal: 'operator',
-    payload: { suggestion_seqs: [1], cooldown_days: 30 },
+    payload: { suggestion_seqs: [s1.seq], cooldown_days: 30 },
     ts: '2026-04-22T10:00:01Z',
   });
-  await seqOf({
+  const seedB = await seedGeneralEvents(writer, 1, { tsBase: '2026-04-25T10:00:00Z' });
+  const s2 = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:s2',
@@ -479,22 +492,21 @@ test('finalization: cleared dismissal does NOT contribute to active cooldown', a
       slug: 'pets',
       name: 'Pets',
       description: 'b',
-      supporting_seqs: [200],
+      supporting_seqs: seedB,
       rationale: '...',
     }),
     ts: '2026-05-01T10:00:00Z',
   });
-  await seqOf({
+  await writer.append({
     type: 'TOPIC_SUGGESTION_ACCEPTED',
     isStateBearing: true,
     intentId: 'intent:a',
     principal: 'operator',
-    payload: { suggestion_seq: 3, accepted_slug: 'pets' },
+    payload: { suggestion_seq: s2.seq, accepted_slug: 'pets' },
     ts: '2026-05-01T10:00:01Z',
   });
-  // Operator deletes the accepted topic conceptually (not modeled here) and
-  // a NEW suggestion lands; dismissed again.
-  await seqOf({
+  const seedC = await seedGeneralEvents(writer, 1, { tsBase: '2026-05-20T10:00:00Z' });
+  const s3 = await writer.append({
     type: 'TOPIC_SUGGESTED',
     isStateBearing: true,
     intentId: 'intent:s3',
@@ -503,24 +515,23 @@ test('finalization: cleared dismissal does NOT contribute to active cooldown', a
       slug: 'pets',
       name: 'Pets',
       description: 'c',
-      supporting_seqs: [300],
+      supporting_seqs: seedC,
       rationale: '...',
     }),
     ts: '2026-06-01T10:00:00Z',
   });
-  await seqOf({
+  await writer.append({
     type: 'TOPIC_SUGGESTION_DISMISSED',
     isStateBearing: true,
     intentId: 'intent:d2',
     principal: 'operator',
-    payload: { suggestion_seqs: [5], cooldown_days: 60 },
+    payload: { suggestion_seqs: [s3.seq], cooldown_days: 60 },
     ts: '2026-06-01T10:00:01Z',
   });
 
   const state = await interpret(writer);
   const cd = state.cooldowns_by_normalized_slug.get('pets');
-  assert.ok(cd, 'a cooldown should remain — the SECOND dismissal is not cleared');
-  // The strongest uncleared dismissal is #2 (60d from 2026-06-01).
+  assert.ok(cd, 'a cooldown should remain — the second dismissal is not cleared');
   const expectedUntil = Date.parse('2026-06-01T10:00:01Z') + 60 * 86400000;
   assert.equal(cd.until_ts, expectedUntil);
 });
