@@ -55,7 +55,7 @@ Most AI memory systems work like this:
 
 **Nightly curation.** A separate pipeline processes modified topic files: promotes new facts from Layer 3 to Layer 2, propagates event log entries, updates metadata, flags contradictions. Only touches files that changed — zero cost on quiet nights.
 
-**Topic suggestion.** When facts accumulate under the generic `general` slug (no dedicated topic file), a nightly script detects clusters and suggests creating new topic files. User approves, a script creates the file, and future facts route automatically.
+**Topic suggestion.** When facts accumulate under the generic `general` slug (no dedicated topic file), a nightly detection pipeline (`silo suggest --run-now`, cron-driven) clusters them and writes `TOPIC_SUGGESTED` events to the log. The MCP server surfaces pending suggestions via a `_silo_notices` array on `read_index` / `search` / `list_handoffs` responses, plus a dedicated `list_pending_suggestions` tool. The user says yes/no in conversation — `accept_suggestion` emits an atomic (TOPIC_METADATA_SET, TOPIC_SUGGESTION_ACCEPTED) batch and the topic file appears on the next regen; `dismiss_suggestion` records a per-slug cooldown so the same cluster doesn't re-propose until the cooldown expires. Operator-side admin via `silo suggest --list / --accept / --dismiss / --status`.
 
 **Search hierarchy.** Seven levels, cheapest first:
 1. Current context (free)
@@ -118,6 +118,40 @@ Without a provider configured, `silo curate` and `silo extract` fail fast with a
 - **OpenClaw:** [quickstart/openclaw/SETUP.md](quickstart/openclaw/SETUP.md) — Full setup with automated pipelines (~30 minutes)
 - **Claude Code:** [quickstart/claude-code/SETUP.md](quickstart/claude-code/SETUP.md) — Manual workflow with auto-loaded files (~15 minutes)
 - **Other platforms:** [reference/adapting-to-other-platforms.md](reference/adapting-to-other-platforms.md)
+
+## Topic suggestions (Phase 2.2)
+
+Silo can propose new topic files automatically when `general`-slug events
+cluster around a coherent subject. This is the only Silo feature that
+writes a *suggestion* (rather than a fact) into the log — the user
+decides whether to act on it.
+
+**Detection** (cron, daily 04:00 UTC): `scripts/silo-detect.sh` runs
+`silo suggest --run-now`, which scans recent `general` events, calls an
+LLM with an anti-fragmentation prompt, and emits one `TOPIC_SUGGESTED`
+event per validated cluster. Validators reject clusters whose slug
+collides with an existing topic, whose normalized slug is in an active
+cooldown, or whose support fingerprint overlaps ≥0.65 Jaccard with any
+pending / cooldown-active suggestion.
+
+**Surfacing** (passive): the MCP server adds a `_silo_notices` array
+(`kind: "pending_topic_suggestions"`) to `read_index` / `search` /
+`list_handoffs` responses when at least one suggestion is pending. The
+consumer LLM is expected to mention the notice once per session when
+relevant, then leave it alone. `list_pending_suggestions` returns the
+full envelope on demand.
+
+**Resolution**: `accept_suggestion({suggestion_seq, slug?, description?,
+type?, tags?})` emits an atomic batch (`TOPIC_METADATA_SET` +
+`TOPIC_SUGGESTION_ACCEPTED`) under the operation-log lock. After lock
+release the server regenerates projections and the topic file appears.
+`dismiss_suggestion({suggestion_seqs, cooldown_days?, reason?})` records
+a per-normalized-slug cooldown so the same cluster won't re-propose
+until expiry.
+
+**Operator/debug**: `silo suggest --list | --accept <seq> | --dismiss
+<seq> | --status | --bulk-scan` covers the same surface from the CLI
+without needing MCP.
 
 ## Architecture deep dive
 

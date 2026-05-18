@@ -115,6 +115,12 @@ async function cmdInit({ 'silo-dir': siloDir, operator, uid }) {
   console.log(`silo: initialized at ${siloDir}`);
   console.log(`  operator = ${principal} (uid ${uidNum})`);
   console.log(`  tail = seq ${writer.tail().seq}`);
+  console.log('');
+  console.log('Next steps:');
+  console.log('  silo write --slug=<topic> --content="..."  — append your first event');
+  console.log('  silo curate                                  — promote events to Layer 2 (LLM key required)');
+  console.log('  silo suggest --run-now                       — auto-detect new topics from `general` events');
+  console.log('  silo suggest --list                          — review pending topic suggestions');
 }
 
 async function cmdStatus({ 'silo-dir': siloDir }) {
