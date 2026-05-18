@@ -41,6 +41,12 @@ import { readSessionDelta } from '../distill/transcript.js';
 import { distill } from '../distill/distill.js';
 import { tokenize, jaccardSimilarity } from '../distill/tokenize.js';
 import { pickLlmClient } from '../distill/llm-factory.js';
+import {
+  isBootstrapEligible,
+  resolveBootstrapEvents,
+  buildBootstrapPrompt,
+  parseBootstrapResponse,
+} from '../curate/bootstrap.js';
 
 // Defaults can be overridden by env vars (standard CLI pattern: KUBECONFIG,
 // AWS_PROFILE, EDITOR, etc.) so users don't have to pass --silo-dir and
@@ -395,6 +401,90 @@ async function cmdExtract({
   );
 }
 
+/**
+ * Bootstrap a single accepted-but-empty topic. Reads the suggestion's
+ * supporting_seqs (which live under `general`) and emits Layer 2 bullets
+ * via the LLM. Phase 2.2 §10.
+ *
+ * Idempotent: subsequent runs find ≥1 active CURATED bullet and skip
+ * (isBootstrapEligible returns false).
+ *
+ * @returns {Promise<Object>} summary record
+ */
+async function runBootstrapCurate({ slug, state, writer, llm, dryRun, principal }) {
+  const meta = state.topic_index.get(slug);
+  const suggestionSeq = state.accepted_topic_suggestion_by_slug.get(slug);
+  const suggestion = state.topic_suggestions.get(suggestionSeq);
+  const events = resolveBootstrapEvents(suggestion.supporting_seqs, state);
+
+  if (events.length === 0) {
+    return { slug, skipped: true, reason: 'no_resolvable_supporting_events' };
+  }
+
+  const { systemPrompt, userPrompt } = buildBootstrapPrompt({
+    slug,
+    name: suggestion.name,
+    summary: meta.topic_summary || suggestion.description,
+    type: meta.topic_type,
+    tags: Array.isArray(meta.topic_tags) ? meta.topic_tags : [],
+    events,
+  });
+
+  if (dryRun) {
+    return {
+      slug,
+      events_used: events.length,
+      prompt_chars: systemPrompt.length + userPrompt.length,
+      dry_run: true,
+    };
+  }
+
+  const response = await llm.complete(systemPrompt, userPrompt);
+  const raw = response?.content ?? '';
+  const parsed = parseBootstrapResponse(raw);
+
+  if (parsed === 'NOTHING_TO_ADD') {
+    return { slug, skipped: true, reason: 'llm_nothing_to_add' };
+  }
+
+  let written = 0;
+  for (const bullet of parsed) {
+    await writer.append({
+      type: 'write_event',
+      isStateBearing: true,
+      intentId: `intent:${uuidv7()}`,
+      principal: principal || 'curator',
+      payload: {
+        slug,
+        tag: 'CURATED',
+        content: `- ${bullet}`,
+        source: 'silo-curate-bootstrap',
+        curated_at: new Date().toISOString(),
+      },
+    });
+    written += 1;
+  }
+  if (written > 0) {
+    await writer.append({
+      type: 'TOPIC_CURATED',
+      isStateBearing: true,
+      intentId: `intent:${uuidv7()}`,
+      principal: principal || 'curator',
+      payload: {
+        topic: slug,
+        source: 'silo-curate-bootstrap',
+        bullets_added: written,
+      },
+    });
+  }
+  return {
+    slug,
+    events_used: events.length,
+    bullets_written: written,
+    tokens_used: response?.usage?.total_tokens ?? null,
+  };
+}
+
 async function cmdCurate({
   'silo-dir': siloDir,
   slug,
@@ -417,6 +507,37 @@ async function cmdCurate({
     process.exit(2);
   }
 
+  const summary = { slugs: 0, bootstrapped: [], curated: [], skipped: [] };
+
+  // ── Phase 2.2 §10: bootstrap pre-loop pass ─────────────────────────────────
+  // Topics created via accept_suggestion have no own-slug events. Seed Layer 2
+  // from the original `general` evidence (the suggestion's supporting_seqs)
+  // before falling through to the normal curate loop. Bootstrap is idempotent:
+  // once ≥1 active CURATED bullet exists, eligibility returns false.
+  const bootstrapSlugs = [];
+  // When a single --slug is requested, only consider that one; otherwise scan.
+  const slugsToCheck = slug ? [slug] : [...state.topic_index.keys()];
+  for (const s of slugsToCheck) {
+    if (isBootstrapEligible(s, state)) bootstrapSlugs.push(s);
+  }
+  for (const bootSlug of bootstrapSlugs) {
+    const r = await runBootstrapCurate({
+      slug: bootSlug,
+      state,
+      writer,
+      llm,
+      dryRun,
+      principal,
+    });
+    summary.bootstrapped.push(r);
+  }
+  if (bootstrapSlugs.length > 0 && !dryRun) {
+    // Re-interpret so the normal curate loop below sees the just-written
+    // CURATED bullets (and skips the now-bootstrapped slugs because their
+    // recent-event count is unchanged but they no longer match eligibility).
+    Object.assign(state, await interpret(writer));
+  }
+
   // Determine target slugs: explicit single, or all curated topics with recent activity.
   const targetSlugs = slug ? [slug] : [];
   if (!slug) {
@@ -427,8 +548,7 @@ async function cmdCurate({
       if (recent.length >= minNewEvents) targetSlugs.push(s);
     }
   }
-
-  const summary = { slugs: targetSlugs.length, curated: [], skipped: [] };
+  summary.slugs = targetSlugs.length;
 
   for (const targetSlug of targetSlugs) {
     const meta = state.topic_index.get(targetSlug);
