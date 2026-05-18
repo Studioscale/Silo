@@ -47,6 +47,12 @@ import {
   buildBootstrapPrompt,
   parseBootstrapResponse,
 } from '../curate/bootstrap.js';
+import { detectTopicClusters, isCooldownActive } from '../topic-proposal/detect.js';
+import {
+  acceptSuggestion,
+  dismissSuggestions,
+  SuggestionOpError,
+} from '../topic-proposal/suggestion-ops.js';
 
 // Defaults can be overridden by env vars (standard CLI pattern: KUBECONFIG,
 // AWS_PROFILE, EDITOR, etc.) so users don't have to pass --silo-dir and
@@ -129,7 +135,7 @@ async function cmdStatus({ 'silo-dir': siloDir }) {
   console.log(JSON.stringify(summary, null, 2));
 }
 
-async function cmdWrite({ 'silo-dir': siloDir, slug, tag, content, principal, confidence }) {
+async function cmdWrite({ 'silo-dir': siloDir, slug, tag, content, principal, confidence, source }) {
   if (!slug || !content) {
     console.error('silo write: --slug and --content required');
     process.exit(2);
@@ -137,6 +143,7 @@ async function cmdWrite({ 'silo-dir': siloDir, slug, tag, content, principal, co
   const writer = await openWriter(siloDir);
   const payload = { slug, tag: tag || 'FACT', content };
   if (confidence) payload.confidence = confidence;
+  if (source) payload.source = source;
   const result = await writer.append({
     type: 'write_event',
     isStateBearing: true,
@@ -144,7 +151,7 @@ async function cmdWrite({ 'silo-dir': siloDir, slug, tag, content, principal, co
     principal,
     payload,
   });
-  console.log(`written: seq ${result.seq} slug=${slug} tag=${tag || 'FACT'}${confidence ? ':' + confidence : ''}`);
+  console.log(`written: seq ${result.seq} slug=${slug} tag=${tag || 'FACT'}${confidence ? ':' + confidence : ''}${source ? ' source=' + source : ''}`);
 }
 
 async function cmdRead({ 'silo-dir': siloDir, slug }) {
@@ -800,6 +807,177 @@ Output retirements (if any) then new bullets, per the rules above.`;
   console.log(JSON.stringify(summary, null, 2));
 }
 
+// ── silo suggest — Phase 2.2 §12.2 admin subcommand ──────────────────────────
+
+async function cmdSuggest(values) {
+  const siloDir = values['silo-dir'];
+  const writer = await openWriter(siloDir);
+
+  // Subverb dispatch — exactly one of these must be set.
+  const verbs = ['run-now', 'list', 'accept', 'dismiss', 'status', 'bulk-scan'];
+  const active = verbs.filter((v) => values[v] !== undefined && values[v] !== false);
+  if (active.length === 0) {
+    console.error(`silo suggest: one of --${verbs.map((v) => v).join(', --')} required`);
+    process.exit(2);
+  }
+  if (active.length > 1) {
+    console.error(`silo suggest: only one subverb allowed (got: ${active.join(', ')})`);
+    process.exit(2);
+  }
+  const verb = active[0];
+
+  switch (verb) {
+    case 'run-now':
+    case 'bulk-scan': {
+      const state = await interpret(writer);
+      const { client: llm, error: llmError } = pickLlmClient({ model: values.model });
+      if (!llm && !values['dry-run']) {
+        console.error(`silo suggest: ${llmError} (or use --dry-run)`);
+        process.exit(2);
+      }
+      const result = await detectTopicClusters({
+        writer,
+        state,
+        llm: llm ?? { complete: async () => ({ content: '' }) },
+        bulkScan: verb === 'bulk-scan',
+        runId: values['run-id'],
+        dryRun: !!values['dry-run'],
+        options: {
+          scan_slugs: values['scan-slugs']
+            ? values['scan-slugs'].split(',').map((s) => s.trim()).filter(Boolean)
+            : undefined,
+          days_back: values['days-back']
+            ? Number.parseInt(values['days-back'], 10)
+            : verb === 'bulk-scan' ? 180 : undefined,
+          principal: values.principal,
+        },
+      });
+      console.log(JSON.stringify(result, null, 2));
+      // Regenerate if anything landed and not a dry-run.
+      if (!values['dry-run'] && result.suggested?.length) {
+        const target = values.to;
+        if (target) {
+          const freshState = await interpret(writer);
+          await regenerateProjections({ logReader: writer, state: freshState, targetDir: target });
+        }
+      }
+      break;
+    }
+    case 'list': {
+      const state = await interpret(writer);
+      const pending = [...state.pending_topic_suggestion_seqs]
+        .map((seq) => state.topic_suggestions.get(seq))
+        .filter(Boolean)
+        .sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+      if (values.json) {
+        console.log(JSON.stringify(pending, null, 2));
+      } else {
+        if (pending.length === 0) {
+          console.log('(no pending suggestions)');
+        } else {
+          for (const s of pending) {
+            console.log(`[seq ${s.seq}] ${s.slug} — ${s.name}`);
+            console.log(`  description: ${s.description}`);
+            console.log(`  supporting_seqs: ${s.supporting_seqs.join(', ')}`);
+            console.log(`  rationale: ${s.rationale}`);
+            console.log(`  proposed_at: ${s.ts}`);
+            console.log('');
+          }
+        }
+      }
+      break;
+    }
+    case 'accept': {
+      const seq = Number.parseInt(values.accept, 10);
+      if (!Number.isSafeInteger(seq) || seq < 1) {
+        console.error('silo suggest --accept: <seq> must be a positive integer');
+        process.exit(2);
+      }
+      const tags = values.tags
+        ? values.tags.split(',').map((t) => t.trim()).filter(Boolean)
+        : undefined;
+      try {
+        const result = await acceptSuggestion(writer, {
+          suggestion_seq: seq,
+          slug: values.slug,
+          description: values.description,
+          type: values.type,
+          tags,
+          principal: values.principal,
+        });
+        console.log(JSON.stringify(result, null, 2));
+        if (values.to) {
+          const freshState = await interpret(writer);
+          await regenerateProjections({ logReader: writer, state: freshState, targetDir: values.to });
+        }
+      } catch (err) {
+        if (err instanceof SuggestionOpError) {
+          console.error(`silo suggest --accept: ${err.code} — ${err.message}`);
+          if (err.detail) console.error(JSON.stringify(err.detail, null, 2));
+          process.exit(1);
+        }
+        throw err;
+      }
+      break;
+    }
+    case 'dismiss': {
+      const seqList = String(values.dismiss)
+        .split(',')
+        .map((s) => Number.parseInt(s.trim(), 10))
+        .filter((n) => Number.isSafeInteger(n) && n >= 1);
+      if (seqList.length === 0) {
+        console.error('silo suggest --dismiss: <seq>[,<seq>...] required');
+        process.exit(2);
+      }
+      try {
+        const result = await dismissSuggestions(writer, {
+          suggestion_seqs: seqList,
+          cooldown_days: values['cooldown-days']
+            ? Number.parseInt(values['cooldown-days'], 10)
+            : undefined,
+          reason: values.reason,
+          principal: values.principal,
+        });
+        console.log(JSON.stringify(result, null, 2));
+        if (values.to) {
+          const freshState = await interpret(writer);
+          await regenerateProjections({ logReader: writer, state: freshState, targetDir: values.to });
+        }
+      } catch (err) {
+        if (err instanceof SuggestionOpError) {
+          console.error(`silo suggest --dismiss: ${err.code} — ${err.message}`);
+          if (err.detail) console.error(JSON.stringify(err.detail, null, 2));
+          process.exit(1);
+        }
+        throw err;
+      }
+      break;
+    }
+    case 'status': {
+      const state = await interpret(writer);
+      const now = Date.now();
+      const activeCooldowns = [...state.cooldowns_by_normalized_slug.entries()]
+        .filter(([, rec]) => isCooldownActive(rec, now))
+        .map(([normSlug, rec]) => ({
+          normalized_slug: normSlug,
+          until_ts: new Date(rec.until_ts).toISOString(),
+          source_dismissal_seq: rec.source_dismissal_seq,
+        }));
+      const summary = {
+        pending: state.pending_topic_suggestion_seqs.size,
+        accepted: [...state.topic_suggestions.values()].filter((s) => s.status === 'accepted').length,
+        dismissed: [...state.topic_suggestions.values()].filter((s) => s.status === 'dismissed').length,
+        active_cooldowns: activeCooldowns,
+      };
+      console.log(JSON.stringify(summary, null, 2));
+      break;
+    }
+    default:
+      // unreachable due to active.length === 1 check
+      throw new Error('unreachable');
+  }
+}
+
 async function cmdRegenerate({ 'silo-dir': siloDir, to }) {
   if (!to) {
     console.error('silo regenerate: --to <target-dir> required (e.g., /root/clawd-v3)');
@@ -841,6 +1019,7 @@ async function main() {
     tag: { type: 'string' },
     content: { type: 'string' },
     confidence: { type: 'string' },
+    source: { type: 'string' },
     operator: { type: 'string' },
     uid: { type: 'string' },
     query: { type: 'string' },
@@ -858,6 +1037,22 @@ async function main() {
     'days-back': { type: 'string' },
     'min-events': { type: 'string' },
     model: { type: 'string' },
+    // ── Phase 2.2 `silo suggest` flags ────────────────────────────────────
+    'run-now': { type: 'boolean', default: false },
+    list: { type: 'boolean', default: false },
+    accept: { type: 'string' },
+    dismiss: { type: 'string' },
+    status: { type: 'boolean', default: false }, // `silo suggest --status` diagnostic verb. TOPIC_METADATA_SET status defaults to 'active'; no CLI override (mirrors MCP accept_suggestion which also doesn't expose it).
+    'bulk-scan': { type: 'boolean', default: false },
+    'cooldown-days': { type: 'string' },
+    reason: { type: 'string' },
+    json: { type: 'boolean', default: false },
+    name: { type: 'string' },
+    description: { type: 'string' },
+    type: { type: 'string' },
+    tags: { type: 'string' },
+    'scan-slugs': { type: 'string' },
+    'run-id': { type: 'string' },
   };
   const { values } = parseArgs({ args: argv, options, strict: false, allowPositionals: true });
 
@@ -892,6 +1087,9 @@ async function main() {
       case 'regenerate':
         await cmdRegenerate(values);
         break;
+      case 'suggest':
+        await cmdSuggest(values);
+        break;
       default:
         console.error(`silo: unknown command "${command}"`);
         printHelp();
@@ -910,12 +1108,17 @@ function printHelp() {
 usage: silo <command> [options]
 
 commands:
-  init     initialize a fresh silo
-  status   show current broker state
-  write    append a write_event to the log
-  read     print history of a topic
-  search   retrieve matching topics (exact | context | orient)
-  extract  distill memory entries from a session transcript
+  init        initialize a fresh silo
+  status      show current broker state
+  write       append a write_event to the log [--source=<s>]
+  read        print history of a topic
+  search      retrieve matching topics (exact | context | orient)
+  extract     distill memory entries from a session transcript
+  curate      promote events to Layer 2 (auto-bootstraps accepted suggestions)
+  suggest     topic-proposal admin: --run-now | --list | --accept <seq>
+              --dismiss <seq> | --status | --bulk-scan
+  regenerate  rebuild Zone B projections (topic files, event logs,
+              TOPIC-INDEX.md, PENDING-SUGGESTIONS.json) from the log
 
 global options:
   --silo-dir=<path>    silo data directory (default: .silo)
