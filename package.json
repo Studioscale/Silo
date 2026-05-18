@@ -19,5 +19,8 @@
     "minisearch": "^7.1.0",
     "uuid": "^11.0.0"
   },
+  "optionalDependencies": {
+    "fs-ext": "^2.0.0"
+  },
   "devDependencies": {}
 }
