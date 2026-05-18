@@ -87,6 +87,21 @@ test('matrix: listTypes returns all registered events (sanity check)', () => {
   assert.ok(types.includes('REGISTER_EVENT_TYPE'));
 });
 
+test('matrix: Phase 2.2 topic-proposal lifecycle types registered (topic family, state-bearing)', () => {
+  const m = loadMatrix();
+  for (const t of ['TOPIC_SUGGESTED', 'TOPIC_SUGGESTION_ACCEPTED', 'TOPIC_SUGGESTION_DISMISSED']) {
+    assert.equal(m.isKnown(t), true, `${t} should be in matrix`);
+    assert.equal(m.isStateBearing(t), true, `${t} should be state-bearing`);
+    assert.equal(m.family(t), 'topic', `${t} should be topic family`);
+    // Admissible on standard + admin in normal mode; rejected during freeze/recovery/read-only.
+    assert.equal(m.isAdmissible(t, 'standard', 'normal'), true);
+    assert.equal(m.isAdmissible(t, 'admin', 'normal'), true);
+    assert.equal(m.isAdmissible(t, 'standard', 'install_freeze'), false);
+    assert.equal(m.isAdmissible(t, 'standard', 'recovery'), false);
+    assert.equal(m.isAdmissible(t, 'standard', 'read_only'), false);
+  }
+});
+
 test('matrix: TOPIC_BULLETS_RETIRED is known, state-bearing, topic family', () => {
   // Phase 2 of dreaming-inspired upgrade: curation pipeline retires Layer 2
   // bullets that recent events have invalidated.

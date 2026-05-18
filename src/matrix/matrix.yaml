@@ -155,7 +155,79 @@ events:
   # status, sensitivity, created). Latest-wins semantics; regenerator merges.
   # Decoupled from write_event because this is authorial intent about the
   # TOPIC itself, not content written INTO the topic.
+  #
+  # Phase 2.2 added admission-time payload validation (see
+  # src/admission/payload-validators.js). Payload contract:
+  #   topic:                  required slug regex, length 2..40
+  #   type:                   optional enum {reference,project,feedback,
+  #                             personal,archive,business,hobby}
+  #   tags:                   optional array length 0..20, items slug-like ≤30
+  #   entities:               optional array length 0..20, items ≤80 chars
+  #   status:                 optional enum {active,paused,archived,
+  #                             reference,deferred}
+  #   sensitivity:            optional string ≤20 chars
+  #   created:                optional YYYY-MM-DD ISO date
+  #   summary:                optional string ≤1000 chars, no CR
+  #   summary_trailing_blank: optional boolean
+  # Unknown fields are rejected to preserve JCS canonical hash stability.
   TOPIC_METADATA_SET:
+    is_state_bearing: true
+    family: topic
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  # ── Phase 2.2 topic-proposal lifecycle ─────────────────────────────────────
+  # TOPIC_SUGGESTED: detector emits one per cluster that passes threshold.
+  # Lifecycle starts here as `pending`; resolved by ACCEPTED or DISMISSED.
+  # Payload contract (admission-validated, see payload-validators.js):
+  #   slug:            required slug regex, length 2..40
+  #   name:            required nonblank single-line string ≤80
+  #   description:     required nonblank single-line string ≤240
+  #   supporting_seqs: required array length 1..100, strictly ascending,
+  #                    items safe positive ints, all ≤ maxKnownSeq
+  #   rationale:       required nonblank single-line string ≤500
+  #   source:          optional nonblank single-line string ≤60
+  # Principal is set by the caller (e.g., `topic-detector`) via append,
+  # not in payload.
+  TOPIC_SUGGESTED:
+    is_state_bearing: true
+    family: topic
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  # TOPIC_SUGGESTION_ACCEPTED: user accepts via MCP. Lifecycle/audit only —
+  # does NOT carry topic metadata (that goes in the paired TOPIC_METADATA_SET
+  # batched alongside per spec §8 canonical accept flow).
+  # Payload contract:
+  #   suggestion_seq:  required safe positive int ≤ maxKnownSeq
+  #   accepted_slug:   required slug regex, length 2..40
+  TOPIC_SUGGESTION_ACCEPTED:
+    is_state_bearing: true
+    family: topic
+    admission:
+      standard: Y
+      admin: Y
+      install_freeze: N
+      read_only: N
+      recovery: N
+
+  # TOPIC_SUGGESTION_DISMISSED: user rejects via MCP (batch). All-or-nothing
+  # semantics — any invalid seq aborts the whole call (see MCP
+  # dismiss_suggestion tool).
+  # Payload contract:
+  #   suggestion_seqs: required array length 1..50, strictly ascending,
+  #                    items safe positive ints, all ≤ maxKnownSeq
+  #   cooldown_days:   required integer 1..365
+  #   reason:          optional nonblank single-line string ≤120
+  TOPIC_SUGGESTION_DISMISSED:
     is_state_bearing: true
     family: topic
     admission:
