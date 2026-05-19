@@ -1132,8 +1132,9 @@ async function cmdDoctor(values) {
   }
   console.log('');
 
-  // Operation log summary.
+  // Operation log summary + curate health (parsed from the log itself).
   console.log(`Operation log: ${join(siloDir, 'operation-log')}/`);
+  let curateStatus = null;
   try {
     const writer = await openWriter(siloDir);
     const tail = writer.tail();
@@ -1142,11 +1143,41 @@ async function cmdDoctor(values) {
       const state = await interpret(writer);
       const lastEntry = state.seq_to_event.get(tail.seq);
       if (lastEntry?.ts) console.log(`  Last write: ${formatTs(lastEntry.ts)}`);
+      curateStatus = deriveCuratorStatus(state);
     }
   } catch (err) {
     console.log(`  Read failed: ${err.message}`);
   }
   console.log('');
+
+  // Curate health — surfaces silent cron failures the user would otherwise
+  // only see by SSHing to /var/log/silo-curate.log. Parsed from `[FACT]
+  // system: silo-curate run ...` events with source=silo-curate, written
+  // by scripts/silo-curate.sh on every cron run.
+  if (curateStatus) {
+    console.log(`Curate status: last ran ${formatTs(curateStatus.last_run_at)}`);
+    if (curateStatus.consecutive_failures > 0) {
+      console.log(`  Status: failing (${curateStatus.consecutive_failures} consecutive failure${curateStatus.consecutive_failures > 1 ? 's' : ''})`);
+      if (curateStatus.last_failure_msg) {
+        console.log(`  Last failure: ${curateStatus.last_failure_msg}`);
+      }
+      if (curateStatus.last_success_at) {
+        console.log(`  Last successful curate: ${formatTs(curateStatus.last_success_at)}`);
+      } else {
+        console.log('  No successful curate yet.');
+      }
+    } else if (curateStatus.last_success_at) {
+      console.log('  Status: ok');
+      console.log(`  Last successful curate: ${formatTs(curateStatus.last_success_at)}`);
+    } else {
+      console.log('  Status: in progress (run started but no complete/failed event yet)');
+    }
+    console.log('');
+  } else {
+    console.log('Curate status: no `silo-curate` events in the log yet.');
+    console.log('  Cron at 05:00 UTC will populate this once it runs.');
+    console.log('');
+  }
 
   // Cache file diagnostics.
   console.log(`Cache file: ${join(siloDir, UPDATE_CACHE_FILENAME)}`);
@@ -1160,6 +1191,54 @@ function formatTs(iso) {
   if (!iso) return '(never)';
   // Display as "YYYY-MM-DD HH:MM UTC" for readability.
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
+/**
+ * Derive curate health from system-slug events with source=silo-curate.
+ * Same pattern as deriveDetectorStatus in regenerate-pending-suggestions.js
+ * (which parses source=silo-topic-detector events for detector_status).
+ *
+ * Content prefixes the cron wrapper emits:
+ *   "silo-curate run started (run_id=...)"
+ *   "silo-curate run complete (run_id=...)"
+ *   "silo-curate run failed (run_id=..., exit=N)"
+ */
+function deriveCuratorStatus(state) {
+  const events = state.topic_content.get('system') ?? [];
+  const curateEvents = events.filter((e) => {
+    if (typeof e.content !== 'string') return false;
+    if (!e.content.startsWith('silo-curate')) return false;
+    const src = state.seq_to_event.get(e.seq)?.source;
+    return src === 'silo-curate';
+  });
+
+  let lastRunAt = null;
+  let lastSuccessAt = null;
+  let lastFailureMsg = null;
+  let consecutiveFailures = 0;
+
+  for (const e of curateEvents) {
+    if (e.content.includes('run started')) {
+      lastRunAt = e.ts;
+    } else if (e.content.includes('run complete')) {
+      lastRunAt = e.ts;
+      lastSuccessAt = e.ts;
+      lastFailureMsg = null;
+      consecutiveFailures = 0;
+    } else if (e.content.includes('run failed')) {
+      lastRunAt = e.ts;
+      lastFailureMsg = e.content;
+      consecutiveFailures += 1;
+    }
+  }
+
+  if (!lastRunAt) return null;
+  return {
+    last_run_at: lastRunAt,
+    last_success_at: lastSuccessAt,
+    consecutive_failures: consecutiveFailures,
+    last_failure_msg: lastFailureMsg,
+  };
 }
 
 async function cmdRegenerate({ 'silo-dir': siloDir, to }) {

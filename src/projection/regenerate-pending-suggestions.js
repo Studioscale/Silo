@@ -111,16 +111,20 @@ function deriveDetectorStatus(state) {
   let lastRunAt = null;
   let lastSuccessAt = null;
   let firstRunDeferred = false;
-  let pendingStartedAfterLastComplete = 0;
+  let consecutiveFailures = 0;
 
   for (const e of detectorEvents) {
     if (e.content.includes('run started')) {
       lastRunAt = e.ts;
-      pendingStartedAfterLastComplete += 1;
     } else if (e.content.includes('run complete')) {
       lastRunAt = e.ts;
       lastSuccessAt = e.ts;
-      pendingStartedAfterLastComplete = 0;
+      consecutiveFailures = 0;
+    } else if (e.content.includes('run failed')) {
+      // silo-detect.sh emits "silo-detect run failed (run_id=..., exit=N)"
+      // when DETECT_STATUS != 0 — count it explicitly.
+      lastRunAt = e.ts;
+      consecutiveFailures += 1;
     } else if (e.content.includes('first run deferred')) {
       lastRunAt = e.ts;
       firstRunDeferred = true;
@@ -128,11 +132,9 @@ function deriveDetectorStatus(state) {
       // No-op run — counts as a successful "nothing to do" tick.
       lastRunAt = e.ts;
       lastSuccessAt = e.ts;
-      pendingStartedAfterLastComplete = 0;
+      consecutiveFailures = 0;
     }
   }
-
-  const consecutiveFailures = Math.max(0, pendingStartedAfterLastComplete - 1);
 
   if (!lastRunAt) {
     return {
