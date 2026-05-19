@@ -5,6 +5,70 @@ implement it. Here's what you need to adapt for each platform.
 
 ---
 
+## Universal MCP client contract
+
+If your client speaks MCP, you don't need filesystem access at all — point it at the bundled `silo-mcp` server and follow the protocol below. This is the path ChatGPT custom connectors, Anthropic Console MCP test harnesses, and homegrown MCP clients should take. Claude Code uses the same tools but layers on CLAUDE.md for cross-cutting rules; non-Claude-Code clients get those rules from `silo_bootstrap` instead.
+
+### Step 1 — call `silo_bootstrap` once
+
+At session start, call `silo_bootstrap` and cache the response for the rest of the session. The response is a structured contract describing:
+
+- `system` / `purpose` / `contract_version` — identification + shape version.
+- `capabilities` — what this Silo instance supports (booleans + version strings like `context_pack: "v0"`).
+- `rules` — startup behavior, retrieval order, do-not list, notices handling, citation policy.
+- `memory_model` — Zone A (operation log, source of truth) vs. Zone B (projection), Layer 1 (header) / 2 (curated facts) / 3 (raw evidence).
+- `tools` — per-tool one-line descriptions oriented to the rule book.
+
+Do not call `silo_bootstrap` repeatedly within a session. It's idempotent and the contract is stable for a given server version — caching it preserves token budget.
+
+### Step 2 — pick a retrieval strategy
+
+The rule of thumb: **slug known → drill straight in; task vague → context pack first; everything else → search.**
+
+| Situation | First call | Then |
+|---|---|---|
+| User mentions a specific slug or topic by name | `get_topic` (or `fetch topic:<slug>`) | Done unless evidence needed. |
+| User asks a vague question that maps to a domain ("what do we have on the CRM?") | `silo_context_pack_v0` with the user's question as `task` | Inspect `selected_topics` + `confidence`; follow `recommended_next_tool_calls`. |
+| You don't know what topics exist | `read_index` | Pick a slug, then `get_topic`. |
+| All else / fallback | `search` | Results are BM25-ranked and MAY include raw Layer 3 — treat as evidence, not curated truth. |
+
+`silo_context_pack_v0` is the best first move for an unfamiliar task: it ranks candidate topics via BM25 and returns Layer 2 excerpts so you don't have to enumerate the index. Low-confidence responses (no strong matches) lead the recommendation list with a `search` call.
+
+### Step 3 — write policy
+
+Writes go through MCP tools, never direct file edits — even if your client has filesystem access. The operation log under `/root/.silo/` is the source of truth; editing projection files (under `/root/clawd-v3/`) is futile because the next `silo regenerate` will overwrite them.
+
+Confirm explicit user intent before calling write tools:
+
+- `write_event` — confirm before recording decisions, user facts, or project updates.
+- `write_handoff` — confirm before queueing curator-review work.
+- `accept_suggestion` / `dismiss_suggestion` — confirm before accepting or rejecting auto-detected topics.
+
+The bootstrap contract's `do_not` list and per-tool descriptions (annotated `WRITE_SIDE_EFFECT`) carry this rule, but it bears repeating: writes without user intent will create durable, audit-logged memory entries that survive regen. There is no quiet undo.
+
+### Step 4 — notices
+
+Read-tool responses (`read_index`, `search`, `list_handoffs`, `silo_context_pack_v0`) may include a `_silo_notices` array. Each entry has a `kind` discriminator; current kinds:
+
+- `pending_topic_suggestions` — Silo auto-detected a recurring theme in `general`-slug events and proposes a new topic. The user can review via `list_pending_suggestions`.
+- `update_available` — A newer Silo release is available.
+- `update_check_unhealthy` — GitHub update check has been failing.
+
+Surface these to the user **once per session** when relevant to their current task. Don't repeat the same notice in every response — that becomes noise.
+
+### ChatGPT / custom connector notes
+
+ChatGPT custom connectors connect MCP servers as "apps" the model can invoke. As of mid-2026 the UI is still evolving:
+
+- **The model may not auto-invoke Silo in every chat.** Users may need to select the Silo connector explicitly via the apps picker, especially in new chats. Don't promise transparent memory in every conversation — the user has to opt the connector in.
+- **The model sees the tool catalog but not your prompt-engineering.** Whatever rules you'd put in a Claude Code `CLAUDE.md` must come through `silo_bootstrap` instead. Stage 2 explicitly designed the contract to carry those rules.
+- **Tokens add up.** Calling `silo_bootstrap` on every turn defeats the purpose; cache the response in the client's working memory for the session.
+- **OAuth is not yet wired.** Current deployments use bearer-token auth. A hosted multi-user variant would need per-user OAuth — see `proposals/universal-client-protocol.md` §5.
+
+If you're building a fresh custom connector against `silo-mcp`, the design note (`proposals/universal-client-protocol.md`) documents the versioning policy, the capabilities-vs-contract_version axes, and the Stage 3 roadmap for smarter ranking.
+
+---
+
 ## Core requirements (any platform)
 
 1. **A writable filesystem** — topic files, event logs, and the topic index are
