@@ -84,6 +84,32 @@ test('parseExtractedEntry: rejects invalid slug (uppercase)', () => {
   assert.equal(parseExtractedEntry('[AUTO-FACT:CONFIRMED] ProjectAlpha: content'), null);
 });
 
+test('parseExtractedEntry: rejects slug with underscores (canonical regex)', () => {
+  // Underscores were previously accepted by the extract parser even though
+  // canonical slug admission rejects them. That mismatch produced surprise
+  // downstream when TOPIC_METADATA_SET / TOPIC_SUGGESTED later rejected the
+  // same slug. Now both layers agree.
+  assert.equal(parseExtractedEntry('[AUTO-FACT:CONFIRMED] team_member: content'), null);
+  assert.equal(parseExtractedEntry('[AUTO-FACT:CONFIRMED] pet_care: content'), null);
+});
+
+test('parseExtractedEntry: rejects single-char slug (length < 2)', () => {
+  // The regex would match `x` but isValidSlug enforces length 2..40.
+  assert.equal(parseExtractedEntry('[AUTO-FACT:CONFIRMED] x: content'), null);
+});
+
+test('parseExtractedEntry: rejects slug with leading/trailing/double hyphen', () => {
+  assert.equal(parseExtractedEntry('[AUTO-FACT:CONFIRMED] -pets: content'), null);
+  assert.equal(parseExtractedEntry('[AUTO-FACT:CONFIRMED] pets-: content'), null);
+  assert.equal(parseExtractedEntry('[AUTO-FACT:CONFIRMED] pet--care: content'), null);
+});
+
+test('parseExtractedEntry: accepts kebab-case slug', () => {
+  const e = parseExtractedEntry('[AUTO-FACT:CONFIRMED] hs-precisao: business event');
+  assert.ok(e);
+  assert.equal(e.slug, 'hs-precisao');
+});
+
 test('parseExtractedEntry: null on blank/empty', () => {
   assert.equal(parseExtractedEntry(''), null);
   assert.equal(parseExtractedEntry('   '), null);

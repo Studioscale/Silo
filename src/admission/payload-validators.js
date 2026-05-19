@@ -1,9 +1,22 @@
 /**
- * Admission payload validators — Silo Phase 2.1 hardening.
+ * Admission payload validators — Silo Phase 2.1 hardening + Phase 2.2 extensions.
  *
  * Validates per-event-type payload shape + minimal local sanity (e.g., seq
  * references must be <= the writer's last-known committed seq) at write-time,
  * before the entry is canonicalized or hash-chained.
+ *
+ * Currently validated event types (each with its own per-type validator
+ * dispatched from the switch in validatePayloadForAppend below):
+ *   - TOPIC_BULLETS_RETIRED          (Phase 2.1)
+ *   - TOPIC_METADATA_SET             (Phase 2.2)
+ *   - TOPIC_SUGGESTED                (Phase 2.2)
+ *   - TOPIC_SUGGESTION_ACCEPTED      (Phase 2.2)
+ *   - TOPIC_SUGGESTION_DISMISSED     (Phase 2.2)
+ *
+ * Other event types pass through admission without payload validation today
+ * (write_event, TOPIC_VERIFIED, TOPIC_CURATED, principal/feature/ACL events,
+ * install / recovery / matrix-meta events). The roadmap follow-up below
+ * tracks the broader gate.
  *
  * Scope: structural validation + prior-seq sanity. NOT semantic referential
  * validation — "seq exists as a CURATED bullet on the same topic" remains
@@ -12,14 +25,14 @@
  * Design context: this is the first instance of write-time payload validation
  * in Silo. The Phase 2.1 audit (Gemini + ChatGPT + fresh Claude + targeted
  * pushback round) converged on:
- *   - Hand-coded validator (Option B), not a generic JSON Schema layer (A)
- *   - Lives in src/admission/ (not LogWriter, not Matrix, not src/broker/)
- *   - Throws structured AdmissionValidationError, not plain Error
+ *   - Hand-coded validators (Option B), not a generic JSON Schema layer (A)
+ *   - Live in src/admission/ (not LogWriter, not Matrix, not src/broker/)
+ *   - Throw structured AdmissionValidationError, not plain Error
  *   - Validator stays write-only; interpret() retains tolerance via state.skipped
  *
  * Followup task (tracked outside this module): wire Matrix.isAdmissible() as a
  * complete write-time gate combined with this payload validation. Today's
- * validator only enforces payload shape, not type/mode admission.
+ * validators enforce payload shape only, not (type, socket, mode) admission.
  */
 
 export const MAX_SUPERSEDED_SEQS = 256;
