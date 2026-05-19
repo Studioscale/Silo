@@ -135,8 +135,13 @@ async function cmdInit({ 'silo-dir': siloDir, operator, uid }) {
   const principal = operator || 'operator';
   const uidNum = uid ? Number.parseInt(uid, 10) : process.getuid?.() ?? 0;
 
+  // M3 — identity events ride the admin socket per matrix.yaml.
+  // Pre-gate (i.e. before src/log/append.js wires Matrix.isAdmissible)
+  // this is a no-op at runtime; the writer doesn't read socket yet.
+  // Lands separately from the gate so each commit stays CI-green.
   await writer.append({
     type: 'PRINCIPAL_DECLARED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: nextIntentId(),
     principal: 'bootstrap',
@@ -144,6 +149,7 @@ async function cmdInit({ 'silo-dir': siloDir, operator, uid }) {
   });
   await writer.append({
     type: 'PRINCIPAL_UID_BOUND',
+    socket: 'admin',
     isStateBearing: true,
     intentId: nextIntentId(),
     principal: 'bootstrap',
@@ -151,6 +157,7 @@ async function cmdInit({ 'silo-dir': siloDir, operator, uid }) {
   });
   await writer.append({
     type: 'PRINCIPAL_ACCESS_ENABLED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: nextIntentId(),
     principal: 'bootstrap',
