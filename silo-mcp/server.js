@@ -19,6 +19,10 @@ import {
   enrichSearchResults,
 } from './fetch.js';
 import { buildBootstrapContract } from './bootstrap-contract.js';
+import {
+  rankTopicsByBM25,
+  buildContextPackEnvelope,
+} from './context-pack.js';
 
 // Tool-annotation hints (MCP SDK 1.29+). readOnlyHint/idempotentHint inform
 // generic clients about side-effect posture; OpenAI Apps SDK security
@@ -254,6 +258,98 @@ server.registerTool(
     return {
       structuredContent: contract,
       content: [{ type: 'text', text: JSON.stringify(contract, null, 2) }],
+    };
+  },
+);
+
+// ── Tool: silo_context_pack_v0 (Stage 2 — universal-client compat) ─────────
+//
+// Given a free-form task description, return a small curated bundle of
+// relevant topics + Layer 2 excerpts. Ranking is delegated to the existing
+// `silo search --mode=context` CLI (BM25 backend via minisearch), so v0
+// stays consistent with what `search` already produces — Stage 3 can
+// replace the subprocess call with smarter ranking (semantic, hybrid)
+// without changing this tool's API surface.
+//
+// Implementation lives in silo-mcp/context-pack.js (pure-data + injectable
+// spawn) for test isolation. Layer 2 is loaded here from the projection
+// because extractLayer2 / loadTopicIndex already exist in server.js.
+
+server.registerTool(
+  'silo_context_pack_v0',
+  {
+    description: 'Given a task description, return a small curated bundle of relevant Silo topics (slug + Layer 2 excerpt) plus a confidence rating and recommended next tool calls. Read-only. Best FIRST call for a vague task when the relevant slug is unknown. Ranking is BM25-deterministic via the silo CLI; semantic ranking is reserved for v1+.',
+    inputSchema: {
+      task: z.string().min(1).max(500).describe('Free-form task description — the user\'s ask, in their words'),
+      max_topics: z.number().int().min(1).max(10).optional().describe('Max topics to return (default 3)'),
+      max_search_results: z.number().int().min(1).max(20).optional().describe('Reserved for v1+ (split search vs. topic budgets); v0 ignores this'),
+    },
+    outputSchema: {
+      task: z.string(),
+      selected_topics: z.array(z.object({
+        slug: z.string(),
+        title: z.string(),
+        score: z.number(),
+        why_selected: z.string(),
+        curated_facts_excerpt: z.string(),
+        metadata: z.object({}).passthrough(),
+      })),
+      confidence: z.enum(['high', 'medium', 'low']),
+      recommended_next_tool_calls: z.array(z.string()),
+      _silo_notices: z.array(z.object({}).passthrough()).optional(),
+    },
+    annotations: READ_ONLY,
+  },
+  async ({ task, max_topics }) => {
+    const maxTopics = max_topics ?? 3;
+    const ranked = rankTopicsByBM25({
+      task,
+      maxTopics,
+      siloDir: SILO_DIR,
+      siloCli: SILO_CLI,
+    });
+    if (ranked.error) {
+      return errorResult(ranked.error.code, ranked.error.message);
+    }
+
+    // Load Layer 2 for each ranked slug. Skipping missing files keeps the
+    // envelope robust against a regen race (CLI ranked a topic before its
+    // projection caught up).
+    const detailsBySlug = new Map();
+    let knownSlugs;
+    try {
+      const idx = await loadTopicIndex();
+      knownSlugs = idx.slugs;
+      // Build a slug → summary lookup so titles in the envelope are friendlier
+      // than the raw slug.
+      const summaryBySlug = new Map(idx.topics.map(t => [t.slug, t.summary]));
+      for (const r of ranked.results) {
+        if (!knownSlugs.has(r.slug)) continue;
+        try {
+          const text = await readFile(join(TOPICS_DIR, `${r.slug}.md`), 'utf-8');
+          detailsBySlug.set(r.slug, {
+            title: summaryBySlug.get(r.slug) || r.slug,
+            layer2: extractLayer2(text),
+          });
+        } catch (err) {
+          if (err.code !== 'ENOENT') throw err;
+          // Missing projection file — skip silently (regen race).
+        }
+      }
+    } catch (err) {
+      return errorResult(err.code || 'FS_ERROR', err.message);
+    }
+
+    const envelope = buildContextPackEnvelope({
+      task,
+      ranked: ranked.results,
+      detailsBySlug,
+    });
+    const notices = await siloNoticesForRead();
+    if (notices) envelope._silo_notices = notices;
+    return {
+      structuredContent: envelope,
+      content: [{ type: 'text', text: JSON.stringify(envelope, null, 2) }],
     };
   },
 );
