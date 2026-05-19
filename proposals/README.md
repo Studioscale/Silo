@@ -21,6 +21,14 @@ Open a Claude Code session in this workspace. Tell the session:
 
 The spec has acceptance criteria (§14) that each implementation step must satisfy. No need to read the audit history unless something is unclear — the spec inlines all decisions.
 
+## Design notes
+
+Design notes document SHIPPED architecture decisions + roadmap intent. Not implementation specs — read these to understand why a surface exists and what direction it's headed, not as a step-by-step build sheet.
+
+| Note | Covers |
+|---|---|
+| `universal-client-protocol.md` | Stage 1/2 universal-client surface (`silo_bootstrap`, `fetch`, `silo_context_pack_v0`, enriched `search`); versioning policy; Stage 3 roadmap. |
+
 ## Audit charter
 
 `phase-2.2-audit-packet.md` is the original audit charter used during the design phase. Useful reference if future features need similar audit cycles.
