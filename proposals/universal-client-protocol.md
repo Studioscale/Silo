@@ -111,13 +111,16 @@ The v0 ranking shells out to `silo search --mode=context`. The CLI's BM25 over s
 - Synonym misses ("clients" vs. "customers", "orçamentos" vs. "estimates").
 - Conceptual queries that don't share vocabulary with curated facts.
 
+**Known issue: confidence thresholds are degenerate at production scale.** Stage 2 picked `high ≥ 4`, `medium ≥ 1.5`, `low < 1.5` by eyeballing the CLI's score distribution against synthetic test data. Smoke testing against the live single-user VPS (23 topics, short summary lines → high IDF) returned BM25 scores 27-86 for a narrow query like "CRM Pipedrive sync" — well above the high threshold, so every narrow query reads `high` regardless of match quality. Semantic ranking (top hits ARE the relevant topics) is correct; the confidence signal is the part that's broken. Stage 3 must retune thresholds against a real query distribution — including misses, ambiguous queries, and conceptual queries — before the confidence field carries useful information.
+
 Stage 3 options, in increasing order of complexity:
 
-1. **Tunable BM25 boosts** — expose slug / tag / content weights as query parameters; tune from real ChatGPT usage logs.
-2. **Embedding-augmented retrieval** — keep BM25 as primary; add a small embedding index over Layer 2 excerpts; merge ranks with reciprocal rank fusion.
-3. **Synthesis cards** — produce multi-topic cards (v12.5 M2 in the existing roadmap) that BM25 can match directly without a fusion step.
+1. **Recalibrate thresholds** (table stakes) — collect query/score traces from real ChatGPT usage, set thresholds at meaningful percentiles of the actual distribution.
+2. **Tunable BM25 boosts** — expose slug / tag / content weights as query parameters; tune from real ChatGPT usage logs.
+3. **Embedding-augmented retrieval** — keep BM25 as primary; add a small embedding index over Layer 2 excerpts; merge ranks with reciprocal rank fusion.
+4. **Synthesis cards** — produce multi-topic cards (v12.5 M2 in the existing roadmap) that BM25 can match directly without a fusion step.
 
-Gate on real usage data: ChatGPT integration must be live and producing context_pack calls before we tune thresholds or invest in semantic ranking.
+Gate on real usage data: ChatGPT integration must be live and producing context_pack calls before we retune thresholds or invest in semantic ranking. Guessing twice in a row is worse than guessing once.
 
 ### `quickstart/chatgpt/SETUP.md`
 
