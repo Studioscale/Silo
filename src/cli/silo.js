@@ -1430,6 +1430,13 @@ async function main() {
       // LLM call failed (after retries, if applicable). Surface the
       // classified hint instead of the raw provider message.
       console.error(formatLlmErrorForCli(err, command));
+    } else if (err?.name === 'AdmissionError') {
+      // M3 admission gate refused the write. Print a parseable token
+      // (`ADMISSION_REFUSED:<code>`) so MCP and log consumers can
+      // pattern-match the structured code without parsing free-text.
+      // See proposals/m3-admission-gate.md §5.1.
+      const details = err.details ? ` ${JSON.stringify(err.details)}` : '';
+      console.error(`silo ${command}: ADMISSION_REFUSED:${err.code} —${details}`);
     } else {
       console.error(`silo ${command}: ${err.message}`);
     }

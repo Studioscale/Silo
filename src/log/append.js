@@ -36,6 +36,13 @@ import { canonicalHash } from './canonical.js';
 import { validatePayloadForAppend } from '../admission/payload-validators.js';
 import { acquireFlock, releaseFlock } from './file-lock.js';
 import { interpret } from '../interpret/index.js';
+import { loadMatrix } from '../matrix/load.js';
+import { AdmissionError } from './admission-error.js';
+
+// Matrix oracle — process-singleton. Loaded once at module init; tests that
+// need a fresh matrix can pass a custom path through future API extensions
+// (out of scope for M3 — the matrix is static during a run).
+const MATRIX = loadMatrix();
 
 const SHORT_WRITE_MAX_RETRIES = 5;
 const SHORT_WRITE_RETRY_BASE_MS = 10;
@@ -256,7 +263,36 @@ export class LogWriter {
     const staged = []; // [{ entry, bytes, hash }]
     for (let i = 0; i < entriesInput.length; i++) {
       const input = entriesInput[i];
-      const { type, isStateBearing, intentId, principal, payload, ts } = input;
+      const { type, isStateBearing, intentId, principal, payload, ts, socket, mode } = input;
+
+      // M3 — Matrix admission gate. Runs BEFORE payload validation so
+      // unauthorized callers don't get payload-shape feedback for events
+      // they were never allowed to emit. See proposals/m3-admission-gate.md
+      // §3.2. socket/mode are writer-control metadata, not persisted —
+      // they're consumed here and never reach buildEntry().
+      const socketOrDefault = socket ?? 'standard';
+      if (mode != null && mode !== 'normal') {
+        throw new AdmissionError('INVALID_WRITER_MODE', {
+          type, socket: socketOrDefault, mode,
+          reason: 'broker modes are reserved; M3 only accepts mode="normal" or absent',
+        });
+      }
+      if (!MATRIX.isKnown(type)) {
+        throw new AdmissionError('UNKNOWN_EVENT_TYPE_NOT_REGISTERED', { type });
+      }
+      if (socketOrDefault !== 'standard' && socketOrDefault !== 'admin') {
+        // Matrix.isAdmissible would throw on this — catch it as a structured
+        // error rather than letting the generic Error propagate.
+        throw new AdmissionError('EVENT_NOT_ADMISSIBLE', {
+          type, socket: socketOrDefault, mode: 'normal',
+          reason: `invalid socket: ${JSON.stringify(socketOrDefault)}`,
+        });
+      }
+      if (!MATRIX.isAdmissible(type, socketOrDefault, 'normal')) {
+        throw new AdmissionError('EVENT_NOT_ADMISSIBLE', {
+          type, socket: socketOrDefault, mode: 'normal',
+        });
+      }
 
       // maxKnownSeq is FROZEN to tail.seq for the whole batch — entries
       // cannot reference seqs staged earlier in this same batch, only
