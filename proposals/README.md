@@ -2,20 +2,13 @@
 
 This folder contains implementation specs that have been audit-validated and are queued for implementation. Each spec is self-contained — no external history-reading required.
 
-## Drafts in review
-
-Specs out for audit but not yet ratified. Do NOT implement until status line at the top of the file reads "Implementation-ready."
-
-| Spec | Scope | LOC est. | Sessions est. | Audit posture |
-|---|---|---|---|---|
-| `m3-admission-gate.md` | Matrix admission gate — wire `Matrix.isAdmissible()` into `_appendBatchUnlocked` so the existing matrix actually enforces admission at write time. | ~150-200 | 1 | DRAFT — pending audit round 1 (ChatGPT + Gemini) |
-
 ## Currently queued
 
 Specs ratified by audit, ready to implement.
 
 | Spec | Scope | LOC est. | Sessions est. | Audit posture |
 |---|---|---|---|---|
+| `m3-admission-gate.md` | Matrix admission gate — wire `Matrix.isAdmissible()` into `_appendBatchUnlocked` + fixture migration. | ~150-200 + fixture commit | 1 (gate) + 1 (fixtures) | 1 round (ChatGPT + Gemini + fresh-Claude agent); unanimous approve-with-minor-changes; folded |
 | `phase-2.2-FINAL.md` | Topic proposal (auto-detect + MCP-surfaced + one-call accept) | ~2,800 | 9-13 | 5 external rounds + 2 pre-flight passes; ratified |
 | `phase-2.3-FINAL.md` | Update notification (auto-check GitHub + MCP-surfaced) | ~260 | 1-2 | 1 pre-flight + 1 external round; ratified |
 
