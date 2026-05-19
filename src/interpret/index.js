@@ -18,6 +18,7 @@
 
 import { newState } from './state.js';
 import { canonicalHash, nfcNormalize } from '../log/canonical.js';
+import { GENESIS_HASH } from '../log/entry.js';
 import { normalizeSlugKey } from '../admission/slug.js';
 import { computeSupportFingerprint } from '../util/support-fingerprint.js';
 import canonicalize from 'canonicalize';
@@ -32,6 +33,14 @@ const DEDUP_WINDOW = 100_000; // v12.5 §8.5 — last 100k entries
  */
 export async function interpret(logReader, matrix = null, asOfSeq = Infinity) {
   const state = newState();
+  // Hash-chain verifier — tracks the canonical hash of the last accepted
+  // entry. The first entry must chain to GENESIS_HASH; each subsequent
+  // entry must chain to the previous. A break lands in state.skipped[]
+  // and the offending entry is NOT folded — so a corrupted middle entry
+  // can't quietly poison downstream state. interpret() stays total
+  // (never throws). Callers that need a hard fail (e.g.
+  // `silo regenerate --strict`) check state.skipped for hash_chain_break.
+  let prevHash = GENESIS_HASH;
 
   for await (const { entry, lineNumber, logFile } of logReader.readAll()) {
     if (entry.seq > asOfSeq) break;
@@ -43,6 +52,21 @@ export async function interpret(logReader, matrix = null, asOfSeq = Infinity) {
         logFile,
         lineNumber,
       });
+      // Don't advance prevHash — next entry must still chain to the last
+      // good one. Shape-broken entries are invisible to the chain.
+      continue;
+    }
+
+    if (entry.hash_prev !== prevHash) {
+      state.skipped.push({
+        seq: entry.seq,
+        reason: 'hash_chain_break',
+        expected_hash_prev: prevHash,
+        got_hash_prev: entry.hash_prev,
+        logFile,
+        lineNumber,
+      });
+      // Don't advance prevHash — next entry chains to the last valid one.
       continue;
     }
 
@@ -60,7 +84,9 @@ export async function interpret(logReader, matrix = null, asOfSeq = Infinity) {
     applyEntry(state, entry);
 
     state.last_seq = entry.seq;
-    state.tail_hash = canonicalHash(entry);
+    const entryHashed = canonicalHash(entry);
+    state.tail_hash = entryHashed;
+    prevHash = entryHashed;
   }
 
   // Phase 2.2 finalization (§4.5): derive cooldowns_by_normalized_slug from
