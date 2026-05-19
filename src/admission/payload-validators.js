@@ -78,6 +78,9 @@ export class AdmissionValidationError extends Error {
 export function validatePayloadForAppend(entry, ctx = {}) {
   if (!entry || typeof entry !== 'object') return;
   switch (entry.type) {
+    case 'write_event':
+      validateWriteEventPayload(entry.payload, ctx);
+      break;
     case 'TOPIC_BULLETS_RETIRED':
       validateTopicBulletsRetiredPayload(entry.payload, ctx);
       break;
@@ -426,3 +429,168 @@ function validateTopicBulletsRetiredPayload(payload, ctx) {
     fail('source', 'must_be_string');
   }
 }
+
+// ─── write_event (audit-found extension) ─────────────────────────────────────
+//
+// write_event is the user-facing primitive. Until this audit, it had no
+// admission validator at all — any payload shape was accepted. That meant:
+//   - a slug like `team_member` (allowed by the older parse.js regex,
+//     not by the canonical) could land in the log via write_event, then
+//     be stranded when later TOPIC_METADATA_SET / TOPIC_SUGGESTED for
+//     the same slug rejected it
+//   - multi-line content survived into the operation log but was
+//     silently truncated to first line by the event-log projection
+//     (regenerate-event-log.js:reconstructEventLine), losing data in
+//     the human-readable .md files
+//
+// The validator below enforces:
+//   - slug matches canonical regex + length 2..40
+//   - tag is one of the recognized event-log tags OR matches an
+//     extraction/curation tag (CURATED, SOURCE) — both are permitted
+//   - content is a non-empty string ≤500 chars
+//   - for tags whose projection is a single-line markdown row
+//     (FACT, DECISION, CHANGED, PROCEDURE, TODO, EVENT, CURATED),
+//     content must not contain \r or \n
+//   - for tag=SOURCE (Layer-3 imported blockquote material), multi-line
+//     is allowed — that's the point of Layer 3
+//   - confidence (optional) is one of CONFIRMED/TENTATIVE/CONTEXT
+//   - source, auto_extracted, curated_at — typed but otherwise loose
+//   - imported (optional) — the import-jarvis round-trip metadata
+//     object. Allowed to carry arbitrary keys (it's already-on-disk
+//     data we're preserving), but must be an object if present.
+
+// Event-log tags rendered as a single markdown row. Includes SECURITY and
+// CURATION which the MCP parser recognizes and which appear in real Jarvis
+// production fixtures.
+const WRITE_EVENT_EVENT_TAGS = new Set([
+  'FACT', 'DECISION', 'CHANGED', 'PROCEDURE', 'TODO', 'EVENT',
+  'SECURITY', 'CURATION',
+]);
+const WRITE_EVENT_INTERNAL_TAGS = new Set(['CURATED', 'SOURCE']);
+const WRITE_EVENT_CONFIDENCES = new Set(['CONFIRMED', 'TENTATIVE', 'CONTEXT']);
+// Only event-log tags require single-line content — that's the format
+// regenerate-event-log.js renders. CURATED is multi-line in practice:
+//   - cron silo-curate emits `- bullet text` per write (single-line, fine)
+//   - import-jarvis emits whole Layer-2 sections (`## heading\n\nbody...`)
+//     as a single event so the section stays a coherent unit
+// SOURCE is Layer-3 blockquote material; multi-line by definition.
+const WRITE_EVENT_SINGLE_LINE_TAGS = new Set([...WRITE_EVENT_EVENT_TAGS]);
+// Event-log tags render as one markdown row; cap content to keep them
+// scannable + match the MCP write_event zod schema (z.string().max(500)).
+// CURATED is multi-line (whole Layer-2 sections); SOURCE is Layer-3
+// blockquote material that can be substantial. Both keep a high but
+// finite cap to bound DoS surface.
+const WRITE_EVENT_MAX_CONTENT_EVENTLOG = 500;
+const WRITE_EVENT_MAX_CONTENT_CURATED = 50_000;
+const WRITE_EVENT_MAX_CONTENT_SOURCE = 200_000;
+const WRITE_EVENT_MAX_SOURCE = 60;
+
+function validateWriteEventPayload(payload, _ctx) {
+  const EVT = 'write_event';
+  const fail = makeFail(EVT);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    fail('payload', 'must_be_object');
+  }
+
+  // Allowed fields. `imported` is a free-form object preserved from the
+  // import-jarvis migration; we permit any sub-keys.
+  const allowed = new Set([
+    'slug', 'tag', 'content', 'confidence', 'source',
+    'auto_extracted', 'curated_at', 'imported',
+  ]);
+  for (const [key] of presentEntries(payload)) {
+    if (!allowed.has(key)) fail(key, 'unknown_field');
+  }
+
+  if (payload.slug === undefined) fail('slug', 'required');
+  assertSlugString(payload.slug, 'slug', fail);
+
+  if (payload.content === undefined) fail('content', 'required');
+  if (typeof payload.content !== 'string') fail('content', 'must_be_string');
+  if (payload.content.length === 0) fail('content', 'must_be_nonblank');
+
+  // Tag is optional — caller defaults to FACT when omitted. If present,
+  // it must be a known event-log or internal tag.
+  if (payload.tag !== undefined) {
+    if (typeof payload.tag !== 'string') fail('tag', 'must_be_string');
+    if (!WRITE_EVENT_EVENT_TAGS.has(payload.tag)
+        && !WRITE_EVENT_INTERNAL_TAGS.has(payload.tag)) {
+      fail('tag', 'unknown_tag', { value: payload.tag });
+    }
+  }
+  const effectiveTag = payload.tag ?? 'FACT';
+
+  // Length cap is per-tag: event-log tags are scannable one-liners,
+  // CURATED is Layer-2 sections, SOURCE is Layer-3 blockquotes.
+  const maxLen = effectiveTag === 'SOURCE'
+    ? WRITE_EVENT_MAX_CONTENT_SOURCE
+    : effectiveTag === 'CURATED'
+    ? WRITE_EVENT_MAX_CONTENT_CURATED
+    : WRITE_EVENT_MAX_CONTENT_EVENTLOG;
+  if (payload.content.length > maxLen) {
+    fail('content', 'length_out_of_range', {
+      max: maxLen,
+      actual: payload.content.length,
+      tag: effectiveTag,
+    });
+  }
+
+  // Single-line enforcement only for tags whose projection renders one
+  // row of markdown — i.e. event-log tags. CURATED + SOURCE preserve
+  // their structure as written.
+  //
+  // CARVE-OUT for imported events: regenerate-event-log.js skips entries
+  // with `payload.imported.field` set (they project to the topic file, not
+  // the event log). Mirror that here — those events never appear as a
+  // single-row event-log entry, so the single-line constraint isn't
+  // meaningful for them. Real example: Jarvis topic-file YAML summaries
+  // can be multi-line folded scalars, emitted as FACT events with
+  // imported.field='summary'.
+  const isProjectedToEventLog = !payload.imported?.field;
+  if (isProjectedToEventLog && WRITE_EVENT_SINGLE_LINE_TAGS.has(effectiveTag)) {
+    if (/[\r\n]/.test(payload.content)) {
+      fail('content', 'must_be_single_line_for_tag', { tag: effectiveTag });
+    }
+  }
+
+  if (payload.confidence !== undefined) {
+    if (typeof payload.confidence !== 'string') fail('confidence', 'must_be_string');
+    if (!WRITE_EVENT_CONFIDENCES.has(payload.confidence)) {
+      fail('confidence', 'enum_violation', { allowed: [...WRITE_EVENT_CONFIDENCES] });
+    }
+  }
+
+  if (payload.source !== undefined) {
+    if (typeof payload.source !== 'string') fail('source', 'must_be_string');
+    if (payload.source.length > WRITE_EVENT_MAX_SOURCE) {
+      fail('source', 'length_out_of_range', {
+        max: WRITE_EVENT_MAX_SOURCE,
+        actual: payload.source.length,
+      });
+    }
+  }
+
+  if (payload.auto_extracted !== undefined
+      && typeof payload.auto_extracted !== 'boolean') {
+    fail('auto_extracted', 'must_be_boolean');
+  }
+
+  if (payload.curated_at !== undefined && typeof payload.curated_at !== 'string') {
+    fail('curated_at', 'must_be_string');
+  }
+
+  if (payload.imported !== undefined) {
+    if (typeof payload.imported !== 'object' || Array.isArray(payload.imported) || payload.imported === null) {
+      fail('imported', 'must_be_object');
+    }
+  }
+}
+
+export {
+  WRITE_EVENT_MAX_CONTENT_EVENTLOG,
+  WRITE_EVENT_MAX_CONTENT_CURATED,
+  WRITE_EVENT_MAX_CONTENT_SOURCE,
+  WRITE_EVENT_SINGLE_LINE_TAGS,
+  WRITE_EVENT_EVENT_TAGS,
+  WRITE_EVENT_INTERNAL_TAGS,
+};

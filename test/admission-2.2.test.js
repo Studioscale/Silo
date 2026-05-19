@@ -480,6 +480,153 @@ test('TOPIC_SUGGESTION_DISMISSED: reason with newline rejected', () => {
   );
 });
 
+// ─── write_event (audit follow-up) ───────────────────────────────────────────
+
+test('write_event: valid minimal payload passes', () => {
+  validatePayloadForAppend(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'FACT', content: 'rover loves walks' } },
+    {},
+  );
+});
+
+test('write_event: rejects unknown field', () => {
+  expectReject(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'FACT', content: 'x', bogus: 1 } },
+    {},
+    'bogus',
+    'unknown_field',
+  );
+});
+
+test('write_event: rejects missing slug', () => {
+  expectReject(
+    { type: 'write_event', payload: { tag: 'FACT', content: 'orphan' } },
+    {},
+    'slug',
+    'required',
+  );
+});
+
+test('write_event: rejects invalid slug', () => {
+  expectReject(
+    { type: 'write_event', payload: { slug: 'BadSlug', tag: 'FACT', content: 'x' } },
+    {},
+    'slug',
+    'slug_regex_mismatch',
+  );
+});
+
+test('write_event: rejects missing content', () => {
+  expectReject(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'FACT' } },
+    {},
+    'content',
+    'required',
+  );
+});
+
+test('write_event: rejects unknown tag', () => {
+  expectReject(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'INVENTED', content: 'x' } },
+    {},
+    'tag',
+    'unknown_tag',
+  );
+});
+
+test('write_event: accepts SECURITY + CURATION tags (Jarvis fixtures use them)', () => {
+  validatePayloadForAppend(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'SECURITY', content: 'audit note' } },
+    {},
+  );
+  validatePayloadForAppend(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'CURATION', content: 'curate note' } },
+    {},
+  );
+});
+
+test('write_event: rejects multi-line content for event-log tags', () => {
+  expectReject(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'FACT', content: 'line 1\nline 2' } },
+    {},
+    'content',
+    'must_be_single_line_for_tag',
+  );
+  expectReject(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'DECISION', content: 'a\rb' } },
+    {},
+    'content',
+    'must_be_single_line_for_tag',
+  );
+});
+
+test('write_event: accepts multi-line content for CURATED + SOURCE', () => {
+  // CURATED can be a whole Layer-2 section (heading + body).
+  validatePayloadForAppend(
+    {
+      type: 'write_event',
+      payload: { slug: 'pets', tag: 'CURATED', content: '## Heading\n\nbody line 1\nbody line 2' },
+    },
+    {},
+  );
+  // SOURCE is Layer-3 blockquote material.
+  validatePayloadForAppend(
+    {
+      type: 'write_event',
+      payload: { slug: 'pets', tag: 'SOURCE', content: '### 2026-05-19 — Title\n> quote\nmore text' },
+    },
+    {},
+  );
+});
+
+test('write_event: imported.field carve-out lets multi-line FACT through (Jarvis YAML summaries)', () => {
+  // The summary write from import-jarvis emits FACT content that can be a
+  // multi-line YAML folded scalar. regenerate-event-log.js skips imported
+  // entries, so single-line enforcement doesn't apply.
+  validatePayloadForAppend(
+    {
+      type: 'write_event',
+      payload: {
+        slug: 'pets',
+        tag: 'FACT',
+        content: 'first line\nsecond line of folded YAML',
+        imported: { source_file: 'x.md', field: 'summary' },
+      },
+    },
+    {},
+  );
+});
+
+test('write_event: rejects content over the per-tag length cap', () => {
+  // Event-log tags: max 500.
+  expectReject(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'FACT', content: 'x'.repeat(501) } },
+    {},
+    'content',
+    'length_out_of_range',
+  );
+  // CURATED: max 50000.
+  expectReject(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'CURATED', content: 'x'.repeat(50_001) } },
+    {},
+    'content',
+    'length_out_of_range',
+  );
+});
+
+test('write_event: confidence enum enforced', () => {
+  validatePayloadForAppend(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'FACT', content: 'x', confidence: 'CONFIRMED' } },
+    {},
+  );
+  expectReject(
+    { type: 'write_event', payload: { slug: 'pets', tag: 'FACT', content: 'x', confidence: 'MAYBE' } },
+    {},
+    'confidence',
+    'enum_violation',
+  );
+});
+
 test('TOPIC_SUGGESTION_DISMISSED: seq beyond maxKnownSeq rejected', () => {
   expectReject(
     {

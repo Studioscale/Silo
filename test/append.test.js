@@ -85,7 +85,7 @@ test('LogWriter: readAll iterates committed entries in order', async () => {
       isStateBearing: true,
       intentId: `intent:${i}`,
       principal: 'helder',
-      payload: { content: `msg-${i}` },
+      payload: { slug: 'demo', content: `msg-${i}` },
       ts: `2026-04-22T10:00:${String(i).padStart(2, '0')}Z`,
     });
   }
@@ -108,7 +108,7 @@ test('LogWriter: hash chain integrity verifiable end-to-end', async () => {
       isStateBearing: true,
       intentId: `intent:${i}`,
       principal: 'helder',
-      payload: { content: `msg-${i}` },
+      payload: { slug: 'demo', content: `msg-${i}` },
       ts: `2026-04-22T10:00:${String(i).padStart(2, '0')}Z`,
     });
   }
@@ -129,7 +129,7 @@ test('LogWriter: init picks up existing log on reopen', async () => {
     isStateBearing: true,
     intentId: 'intent:a',
     principal: 'helder',
-    payload: { content: 'before close' },
+    payload: { slug: 'demo', content: 'before close' },
     ts: '2026-04-22T10:00:00Z',
   });
   const tailHash = writer.tail().hash;
@@ -146,7 +146,7 @@ test('LogWriter: init picks up existing log on reopen', async () => {
     isStateBearing: true,
     intentId: 'intent:b',
     principal: 'helder',
-    payload: { content: 'after reopen' },
+    payload: { slug: 'demo', content: 'after reopen' },
     ts: '2026-04-22T11:00:00Z',
   });
   assert.equal(result.seq, 2);

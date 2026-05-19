@@ -35,8 +35,10 @@ function assertRejects(entry, ctx, expectedField, expectedReason) {
 
 // ─── Pass-through: other event types are not validated ────────────────────
 
-test('admission: non-TOPIC_BULLETS_RETIRED entries pass through unchanged', () => {
-  validatePayloadForAppend({ type: 'write_event', payload: { slug: 'x', tag: 'FACT', content: 'hello' } });
+test('admission: unvalidated event types pass through (TOPIC_VERIFIED, PRINCIPAL_DECLARED)', () => {
+  // write_event is NOW validated (audit follow-up) — so the previous form
+  // of this test which used it as an example of "passes through" no longer
+  // applies. The types below still have no per-type validator.
   validatePayloadForAppend({ type: 'TOPIC_VERIFIED', payload: { topic: 'x' } });
   validatePayloadForAppend({ type: 'PRINCIPAL_DECLARED', payload: { principal: 'foo' } });
   // No throw = pass.

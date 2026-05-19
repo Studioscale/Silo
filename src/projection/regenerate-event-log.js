@@ -53,7 +53,16 @@ function reconstructEventLine(entry) {
   const tag = p.tag || 'EVENT';
   const conf = p.confidence ? `:${p.confidence}` : '';
   const slug = p.slug || 'general';
-  const content = (p.content ?? '').split('\n')[0];
+  // Defensive flatten: write_event admission now rejects multi-line content
+  // for event-log + CURATED tags (see src/admission/payload-validators.js).
+  // For SOURCE (Layer-3) entries, multi-line is allowed at admission but
+  // shouldn't reach this function — sources project into Layer 3 of the
+  // topic file, not into the event log. The previous code did
+  // `.split('\n')[0]` which silently dropped everything after the first
+  // newline. Now we replace any internal newlines with a visible glyph so
+  // accidental multi-line content surfaces in the projection rather than
+  // disappearing.
+  const content = String(p.content ?? '').replace(/\r?\n/g, ' ⏎ ');
 
   const principalPrefix = p.imported?.principal_was_prefixed && entry.principal
     ? `[${entry.principal}] `
