@@ -139,6 +139,49 @@ If both keys are set, Anthropic is preferred. Override the default with `--model
 
 Without a provider configured, `silo curate` and `silo extract` fail fast with an `ANTHROPIC_API_KEY or OPENAI_API_KEY required` error. All other commands work as-is.
 
+### When the API call fails
+
+Silo retries transient errors automatically — rate limits (429), provider 5xx, network blips, timeouts — with exponential backoff (2s, 4s, 8s, max 30s, 3 attempts total). Retry attempts log to stderr so cron operators see what's happening:
+
+```
+silo: LLM rate limit — retrying in 2s (attempt 1/2 of 2 retries)
+```
+
+After retries are exhausted, or for fail-fast errors, the CLI prints a classified message:
+
+```
+silo curate: LLM call failed (quota_exceeded / HTTP 400).
+  Account out of credit / over quota. Top up at https://console.anthropic.com/settings/billing
+  — or pass --model=gpt-5.4 to fail over to OpenAI (OPENAI_API_KEY must be set).
+  Raw: Anthropic 400: Your credit balance is too low to access the Anthropic API.
+```
+
+Error categories:
+
+| Category | Examples | Retryable? | Recovery |
+|---|---|---|---|
+| `auth_invalid` | 401, "invalid x-api-key" | No | Verify `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is set to a valid key. |
+| `quota_exceeded` | Anthropic 400 "credit balance too low", OpenAI 429 "insufficient_quota", any 402 | No | Top up at the provider's billing page, or pass `--model=<other-provider-model>` if both keys are configured. |
+| `rate_limited` | 429 (RPM hit) | Yes (auto-backoff) | Retries automatically; if exhausted, wait a few minutes. |
+| `request_invalid` | 400, 404 (bad model name) | No | Check model name + provider compatibility. |
+| `server_error` | 500, 502, 503 | Yes (auto-backoff) | Retries automatically; if exhausted, check provider status. |
+| `request_timeout` | Client-side timeout (60s) | Yes (auto-backoff) | Usually transient. |
+| `network_error` | `ECONNRESET`, `ENOTFOUND` | Yes (auto-backoff) | Network blip — usually transient. |
+
+For ongoing curation/detection failures (cron-driven), `silo doctor` surfaces the count of consecutive failures and the last successful run:
+
+```
+Curate status: last ran 2026-05-18 05:00 UTC
+  Status: failing (3 consecutive failures)
+  Last failure: silo-curate run failed (run_id=..., exit=1)
+  Last successful curate: 2026-05-15 05:00 UTC
+```
+
+What Silo does **not** do automatically:
+
+- **No fallback provider switch.** If your Anthropic account hits quota and OpenAI is configured, Silo does not auto-fail-over. Pass `--model=gpt-5.4` explicitly. Some users prefer the explicit signal over silent quality drift.
+- **No partial-run resume.** If `silo curate` fails mid-loop after processing 3 of 10 topics, those 3 are persisted (events are append-only); the next cron run re-detects the remaining 7 as still needing curation and tries them again from scratch.
+
 ### Running the MCP bridge under systemd
 
 If you want to run `silo-mcp/` as a long-lived MCP server for Claude
