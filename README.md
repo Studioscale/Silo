@@ -128,10 +128,12 @@ The two automated pipelines need an LLM provider:
 
 Set one of the following environment variables before running them:
 
-| Provider  | Env var               | Default model        |
-|-----------|-----------------------|----------------------|
-| Anthropic | `ANTHROPIC_API_KEY`   | `claude-sonnet-4-6`  |
-| OpenAI    | `OPENAI_API_KEY`      | `gpt-4o`             |
+| Provider  | Env var               | Default model        | Notes                                                                              |
+|-----------|-----------------------|----------------------|-------------------------------------------------------------------------------------|
+| Anthropic | `ANTHROPIC_API_KEY`   | `claude-sonnet-4-6`  | Recommended. Production cron has used this since 2026-05-10.                        |
+| OpenAI    | `OPENAI_API_KEY`      | `gpt-5.4`            | Recommended OpenAI tier. `gpt-4o` works as a budget fallback but loses anti-bundling + retire-detection nuance at the smaller-model tier — don't use it for curate. |
+
+The curate / extract prompts target flagship-tier reasoning (anti-bundling, contradiction detection, retire-vs-add discrimination). Cheaper tiers (`claude-haiku-*`, `gpt-4o-mini`, `o<N>-mini`) compile and run, but the output quality drops noticeably. Stick to Sonnet-4-6 / GPT-5.4 unless you've measured your own use case and the cheaper tier is acceptable for you.
 
 If both keys are set, Anthropic is preferred. Override the default with `--model=<id>` — the provider is auto-detected from the model prefix (`claude-*` → Anthropic, `gpt-*` / `o<digit>` / `chatgpt-*` → OpenAI).
 

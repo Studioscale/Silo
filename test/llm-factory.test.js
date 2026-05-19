@@ -57,11 +57,11 @@ test('pickLlmClient: no model + only ANTHROPIC_API_KEY → Anthropic with defaul
   });
 });
 
-test('pickLlmClient: no model + only OPENAI_API_KEY → OpenAI with default gpt-4o', () => {
+test('pickLlmClient: no model + only OPENAI_API_KEY → OpenAI with default gpt-5.4', () => {
   withEnv({ ANTHROPIC_API_KEY: undefined, OPENAI_API_KEY: 'sk-fake' }, () => {
     const { client, providerName } = pickLlmClient({});
     assert.equal(providerName, 'openai');
-    assert.equal(client.model, 'gpt-4o');
+    assert.equal(client.model, 'gpt-5.4');
   });
 });
 

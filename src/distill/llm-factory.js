@@ -16,7 +16,12 @@ import { OpenAIClient } from './openai-client.js';
 import { AnthropicClient } from './anthropic-client.js';
 
 const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
-const DEFAULT_OPENAI_MODEL = 'gpt-4o';
+// gpt-5.4 is the OpenAI flagship equivalent of Sonnet-4-6 for curation /
+// extraction quality. gpt-4o (the previous default) still works but loses
+// anti-bundling + retire-detection nuance at the smaller-model tier — use
+// gpt-4o only as a budget fallback. Curation prompts target flagship-tier
+// reasoning, not the 4o family.
+const DEFAULT_OPENAI_MODEL = 'gpt-5.4';
 
 export function pickLlmClient({ model } = {}) {
   const openaiKey = process.env.OPENAI_API_KEY;
