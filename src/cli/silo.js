@@ -85,6 +85,37 @@ function nextIntentId() {
   return `intent:${uuidv7()}`;
 }
 
+// ── LLM-config diagnostics shared by cmdDoctor + missing-key errors ─────────
+
+/**
+ * Returns null when no provider env var is set, otherwise an object
+ * describing what pickLlmClient() would resolve to. Pure read of the env;
+ * no network or auth call.
+ */
+function describeLlmConfig() {
+  const anthropicSet = !!process.env.ANTHROPIC_API_KEY;
+  const openaiSet = !!process.env.OPENAI_API_KEY;
+  if (!anthropicSet && !openaiSet) return null;
+  const { client, providerName, error } = pickLlmClient({});
+  return {
+    providerName,
+    defaultModel: client?.model ?? null,
+    anthropicSet,
+    openaiSet,
+    error,
+  };
+}
+
+/** Multi-line missing-provider error pointed at any silo subcommand. */
+function noLlmProviderMessage(cmd) {
+  return [
+    `silo ${cmd}: no LLM provider configured.`,
+    '  Set ANTHROPIC_API_KEY (recommended: claude-sonnet-4-6) or',
+    '  OPENAI_API_KEY (recommended: gpt-5.4). See README "Prerequisites".',
+    '  Or pass --dry-run to skip the LLM call.',
+  ].join('\n');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Commands
 // ─────────────────────────────────────────────────────────────────────────────
@@ -350,7 +381,13 @@ async function cmdExtract({
 
   const { client: llm, error: llmError } = pickLlmClient({ model });
   if (!llm) {
-    console.error(`silo extract: ${llmError} (or inject your own client via API)`);
+    if (!model) {
+      // No-key case → the rich helper (this is the fresh-install path).
+      console.error(noLlmProviderMessage('extract'));
+    } else {
+      // Explicit --model but the matching provider key is missing.
+      console.error(`silo extract: ${llmError}`);
+    }
     process.exit(2);
   }
 
@@ -526,7 +563,11 @@ async function cmdCurate({
 
   const { client: llm, error: llmError } = pickLlmClient({ model });
   if (!llm && !dryRun) {
-    console.error(`silo curate: ${llmError} (or use --dry-run)`);
+    if (!model) {
+      console.error(noLlmProviderMessage('curate'));
+    } else {
+      console.error(`silo curate: ${llmError}`);
+    }
     process.exit(2);
   }
 
@@ -1003,6 +1044,25 @@ async function cmdDoctor(values) {
   const optedOut = isUpdateOptOut();
 
   console.log(`Silo v${SILO_VERSION}`);
+  console.log('');
+
+  // ── LLM provider config (Phase 2.3 §4 + fresh-install UX) ───────────────
+  const llmCfg = describeLlmConfig();
+  if (!llmCfg) {
+    console.log('LLM provider: none configured.');
+    console.log('  `silo extract` / `silo curate` will fail without a key set.');
+    console.log('  Recommended: ANTHROPIC_API_KEY (claude-sonnet-4-6) or');
+    console.log('               OPENAI_API_KEY (gpt-5.4). See README "Prerequisites".');
+  } else {
+    const detected = [];
+    if (llmCfg.anthropicSet) detected.push('ANTHROPIC_API_KEY');
+    if (llmCfg.openaiSet) detected.push('OPENAI_API_KEY');
+    console.log(`LLM provider: ${llmCfg.providerName} (default model: ${llmCfg.defaultModel})`);
+    console.log(`  Keys detected: ${detected.join(', ')}`);
+    if (llmCfg.anthropicSet && llmCfg.openaiSet) {
+      console.log('  Both providers set; Anthropic is preferred when --model is omitted.');
+    }
+  }
   console.log('');
 
   if (checkUpdates) {
