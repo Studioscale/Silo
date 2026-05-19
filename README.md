@@ -255,6 +255,80 @@ log tail + cache-file diagnostics. `silo doctor --check-updates` forces
 a fresh fetch synchronously; `--force` overrides opt-out for that
 single invocation.
 
+## Threat model + known limitations
+
+Silo is the canonical store for the operator's memory. The architecture
+prioritizes auditability (every change is an event with a hash chain) +
+recoverability (Zone B projections are always rebuildable from Zone A).
+A few specific limitations live in the implementation, documented here so
+operators know what's enforced vs. what's roadmap:
+
+**Trust model.** All write paths in the current implementation assume a
+trusted operator. The `silo` CLI, the MCP bridge (behind a bearer token),
+and the cron scripts (`silo-curate.sh`, `silo-detect.sh`) all share the
+same `LogWriter` and write at the same trust level. There is no
+multi-principal authorization at write time today — the matrix in
+`src/matrix/matrix.yaml` describes admission cells per `(socket, mode)`
+but `LogWriter._appendBatchUnlocked` does not yet call
+`Matrix.isAdmissible()` to enforce them. That wiring (and the
+corresponding socket/mode propagation through call sites) is M3 work.
+Until then, an admin-only event type (`ACL_SEALED`, `PRINCIPAL_*`,
+`RECOVERY_MODE_*`) can be emitted through any write path the operator
+controls.
+
+**What IS enforced at write time today:**
+- **Per-event-type payload validation** (`src/admission/payload-validators.js`):
+  `write_event`, `TOPIC_BULLETS_RETIRED`, `TOPIC_METADATA_SET`,
+  `TOPIC_SUGGESTED`, `TOPIC_SUGGESTION_ACCEPTED`,
+  `TOPIC_SUGGESTION_DISMISSED` all have hand-coded validators that
+  reject unknown fields, out-of-range values, and (where applicable)
+  multi-line content for tags that project to single-line markdown.
+  Other event types pass through admission without payload checks today
+  — see the file's header comment for the full list.
+- **Slug canonical form**: all slugs at admission match
+  `^[a-z0-9]+(-[a-z0-9]+)*$` with length 2..40. The extraction parser
+  (`src/distill/parse.js`) was tightened to the same regex so an
+  LLM-emitted slug can't land via `write_event` and then be rejected
+  later by `TOPIC_METADATA_SET`.
+
+**What IS verified at read time:**
+- **Hash chain integrity**: `interpret()` checks
+  `entry.hash_prev === canonicalHash(prevEntry)` on every fold; breaks
+  land in `state.skipped` with `reason='hash_chain_break'` and the
+  offending entry is NOT applied to state. `silo doctor` surfaces the
+  break count + first few details; `silo regenerate --strict` refuses
+  to project from a log with breaks.
+- **Shape integrity**: `interpret()` rejects malformed entries
+  (missing/wrong-type seq, hash_prev, etc.) into the same `state.skipped`
+  channel.
+
+**MCP bearer auth surface:**
+- Bearer token is the only authentication. The token is configured via
+  `SILO_MCP_TOKEN` env at server startup and is shared by all clients.
+- The server accepts the token via `Authorization: Bearer ...` header
+  OR `?token=...` query string. Query strings leak via proxy logs,
+  browser history, and referer headers; the OR-semantic is currently
+  required for a legacy OpenClaw bundle-mcp client. **Roadmap**: gate
+  query-token acceptance behind `SILO_MCP_ALLOW_QUERY_TOKEN` (default
+  false) once that legacy client is fixed.
+
+**Cross-process write safety:**
+- The operation-log flock (via `fs-ext`, optional dependency) gives real
+  cross-process write serialization on Linux + macOS. Windows installs
+  without the C++ toolchain run in **single-process mode** — see the
+  Prerequisites section for the platform toolchain table. Single-process
+  mode is safe for one-user-one-shell setups; cron + interactive shell
+  + MCP racing each other under degraded mode is NOT safe.
+
+**Out of scope of Silo itself:**
+- Token revocation / rotation (rotate `SILO_MCP_TOKEN` + restart the
+  systemd unit).
+- Backup of `/root/.silo/` (operator's responsibility — Silo doesn't
+  schedule its own backups).
+- Network-level access control to the MCP endpoint (the bridge listens
+  on 127.0.0.1 by default; expose via reverse proxy + your normal TLS +
+  firewall posture).
+
 ## Architecture deep dive
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — Full system design
