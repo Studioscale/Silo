@@ -51,7 +51,7 @@ const TOPIC_STATUSES = new Set([
 
 export class AdmissionValidationError extends Error {
   constructor({ code, eventType, field, reason, detail }) {
-    super(`${eventType}: ${field} ${reason}`);
+    super(formatAdmissionMessage({ eventType, field, reason, detail }));
     this.name = 'AdmissionValidationError';
     this.code = code; // INVALID_EVENT_PAYLOAD
     this.eventType = eventType; // e.g. TOPIC_BULLETS_RETIRED
@@ -59,6 +59,51 @@ export class AdmissionValidationError extends Error {
     this.reason = reason; // e.g. must_be_strictly_ascending
     this.detail = detail || null;
   }
+}
+
+/**
+ * Build a human-readable error string. Detail numerics are inlined so the
+ * `.message` is actionable on its own (catching `err.detail.max` works for
+ * machine consumers, but the message-text-only path is what most operators
+ * actually see in logs). Specific reason+field combinations also get a
+ * one-line hint pointing at the right workaround.
+ *
+ * Audit follow-up (Pedro's report): `write_event: content length_out_of_range`
+ * used to be the entire .message — the 500/50000/200000 cap wasn't surfaced
+ * until you opened the detail object. Now it's in the text + the
+ * tag-specific hint about CURATED/SOURCE for long-form content.
+ */
+function formatAdmissionMessage({ eventType, field, reason, detail }) {
+  let msg = `${eventType}: ${field} ${reason}`;
+  if (detail) {
+    if (detail.max !== undefined && detail.actual !== undefined) {
+      msg += ` (actual=${detail.actual}, max=${detail.max}`;
+      if (detail.tag) msg += `, tag=${detail.tag}`;
+      msg += ')';
+    } else if (detail.value !== undefined) {
+      msg += ` (value=${JSON.stringify(detail.value)})`;
+    }
+  }
+  // Field-specific actionable hints.
+  if (
+    eventType === 'write_event' &&
+    field === 'content' &&
+    reason === 'length_out_of_range'
+  ) {
+    msg +=
+      `. For long-form content, use tag=CURATED (max 50_000) or tag=SOURCE ` +
+      `(max 200_000); event-log tags cap at 500 chars by design.`;
+  }
+  if (
+    eventType === 'write_event' &&
+    field === 'content' &&
+    reason === 'must_be_single_line_for_tag'
+  ) {
+    msg +=
+      `. Event-log tags render as one markdown row; multi-line content ` +
+      `must use tag=CURATED or tag=SOURCE instead.`;
+  }
+  return msg;
 }
 
 /**

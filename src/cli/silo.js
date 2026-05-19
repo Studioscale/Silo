@@ -1311,6 +1311,11 @@ async function main() {
     process.exit(0);
   }
 
+  if (command === '--version' || command === '-v' || command === 'version') {
+    console.log(`Silo v${SILO_VERSION}`);
+    process.exit(0);
+  }
+
   // Normalize: `search <query>` lets query be positional.
   let argv = rest;
   let positionalQuery = null;
@@ -1446,7 +1451,7 @@ async function main() {
 }
 
 function printHelp() {
-  console.log(`silo — v12.5 M1
+  console.log(`Silo v${SILO_VERSION}
 
 usage: silo <command> [options]
 
