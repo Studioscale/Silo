@@ -1135,6 +1135,7 @@ async function cmdDoctor(values) {
   // Operation log summary + curate health (parsed from the log itself).
   console.log(`Operation log: ${join(siloDir, 'operation-log')}/`);
   let curateStatus = null;
+  let chainBreaks = [];
   try {
     const writer = await openWriter(siloDir);
     const tail = writer.tail();
@@ -1144,9 +1145,25 @@ async function cmdDoctor(values) {
       const lastEntry = state.seq_to_event.get(tail.seq);
       if (lastEntry?.ts) console.log(`  Last write: ${formatTs(lastEntry.ts)}`);
       curateStatus = deriveCuratorStatus(state);
+      chainBreaks = state.skipped.filter((s) => s.reason === 'hash_chain_break');
     }
   } catch (err) {
     console.log(`  Read failed: ${err.message}`);
+  }
+  // Surface hash-chain breaks loudly — they mean the log is corrupted or
+  // tampered with, and `silo regenerate --strict` will refuse to rebuild
+  // projections from it.
+  if (chainBreaks.length > 0) {
+    console.log(`  ⚠ Hash chain integrity: ${chainBreaks.length} break${chainBreaks.length > 1 ? 's' : ''} detected`);
+    for (const b of chainBreaks.slice(0, 3)) {
+      console.log(`    seq ${b.seq} in ${b.logFile}:${b.lineNumber} — expected ${b.expected_hash_prev?.slice(0, 12)}…, got ${b.got_hash_prev?.slice(0, 12)}…`);
+    }
+    if (chainBreaks.length > 3) {
+      console.log(`    (… and ${chainBreaks.length - 3} more)`);
+    }
+    console.log('  Run `silo regenerate --strict` to refuse projecting from a broken log.');
+  } else {
+    console.log('  Hash chain: ok');
   }
   console.log('');
 
@@ -1241,13 +1258,36 @@ function deriveCuratorStatus(state) {
   };
 }
 
-async function cmdRegenerate({ 'silo-dir': siloDir, to }) {
+async function cmdRegenerate({ 'silo-dir': siloDir, to, strict }) {
   if (!to) {
     console.error('silo regenerate: --to <target-dir> required (e.g., /root/clawd-v3)');
     process.exit(2);
   }
   const writer = await openWriter(siloDir);
   const state = await interpret(writer);
+
+  // --strict refuses to project from a log with hash-chain breaks or
+  // shape-malformed entries. Use after `silo doctor` flags integrity
+  // problems — projection from a corrupt log would propagate the
+  // corruption into Zone B (topic files + event logs).
+  if (strict) {
+    const integrityIssues = state.skipped.filter(
+      (s) => s.reason === 'hash_chain_break' || s.reason === 'malformed_entry_shape',
+    );
+    if (integrityIssues.length > 0) {
+      console.error(`silo regenerate --strict: log integrity issues detected — refusing to project.`);
+      console.error(`  ${integrityIssues.length} skipped entries (chain breaks or shape errors).`);
+      for (const issue of integrityIssues.slice(0, 5)) {
+        console.error(`    seq ${issue.seq} (${issue.reason}) at ${issue.logFile}:${issue.lineNumber}`);
+      }
+      if (integrityIssues.length > 5) {
+        console.error(`    (… and ${integrityIssues.length - 5} more)`);
+      }
+      console.error('  Investigate the log directly or restore from backup. `silo doctor` shows details.');
+      process.exit(1);
+    }
+  }
+
   const result = await regenerateProjections({ logReader: writer, state, targetDir: to });
   console.log(JSON.stringify(result, null, 2));
 }
@@ -1319,6 +1359,9 @@ async function main() {
     // Phase 2.3 doctor flags
     'check-updates': { type: 'boolean', default: false },
     force: { type: 'boolean', default: false },
+    // Audit follow-up: `silo regenerate --strict` refuses to project from a
+    // log with hash-chain breaks or malformed entries.
+    strict: { type: 'boolean', default: false },
   };
   const { values } = parseArgs({ args: argv, options, strict: false, allowPositionals: true });
 
@@ -1406,7 +1449,8 @@ commands:
   doctor      diagnostic readout; --check-updates forces a fresh GitHub check
               (honors SILO_DISABLE_UPDATE_CHECK; --force overrides)
   regenerate  rebuild Zone B projections (topic files, event logs,
-              TOPIC-INDEX.md, PENDING-SUGGESTIONS.json) from the log
+              TOPIC-INDEX.md, PENDING-SUGGESTIONS.json) from the log.
+              --strict refuses to project from a log with chain breaks.
 
 global options:
   --silo-dir=<path>    silo data directory (default: .silo)
