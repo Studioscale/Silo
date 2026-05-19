@@ -63,6 +63,10 @@ import {
   CACHE_FILENAME as UPDATE_CACHE_FILENAME,
   HEALTHY_FAILURE_THRESHOLD,
 } from '../util/update-check.js';
+import {
+  looksLikeLlmError,
+  formatLlmErrorForCli,
+} from '../distill/llm-errors.js';
 
 // Defaults can be overridden by env vars (standard CLI pattern: KUBECONFIG,
 // AWS_PROFILE, EDITOR, etc.) so users don't have to pass --silo-dir and
@@ -1293,7 +1297,13 @@ async function main() {
         process.exit(2);
     }
   } catch (err) {
-    console.error(`silo ${command}: ${err.message}`);
+    if (looksLikeLlmError(err)) {
+      // LLM call failed (after retries, if applicable). Surface the
+      // classified hint instead of the raw provider message.
+      console.error(formatLlmErrorForCli(err, command));
+    } else {
+      console.error(`silo ${command}: ${err.message}`);
+    }
     if (process.env.SILO_DEBUG) console.error(err.stack);
     process.exit(1);
   }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { pickLlmClient } from '../src/distill/llm-factory.js';
 import { AnthropicClient } from '../src/distill/anthropic-client.js';
 import { OpenAIClient } from '../src/distill/openai-client.js';
+import { RetryingLlmClient } from '../src/distill/retry-llm-client.js';
 
 function withEnv(overrides, fn) {
   const saved = {};
@@ -21,12 +22,14 @@ function withEnv(overrides, fn) {
   }
 }
 
-test('pickLlmClient: explicit claude-* model picks Anthropic', () => {
+test('pickLlmClient: explicit claude-* model picks Anthropic (wrapped in RetryingLlmClient)', () => {
   withEnv({ ANTHROPIC_API_KEY: 'sk-ant-fake', OPENAI_API_KEY: 'sk-fake' }, () => {
     const { client, providerName, error } = pickLlmClient({ model: 'claude-haiku-4-5' });
     assert.equal(error, null);
     assert.equal(providerName, 'anthropic');
-    assert.ok(client instanceof AnthropicClient);
+    // Returned client is always retry-wrapped; the underlying provider is on .inner.
+    assert.ok(client instanceof RetryingLlmClient);
+    assert.ok(client.inner instanceof AnthropicClient);
     assert.equal(client.model, 'claude-haiku-4-5');
   });
 });
@@ -39,11 +42,12 @@ test('pickLlmClient: explicit claude-* model without ANTHROPIC_API_KEY errors', 
   });
 });
 
-test('pickLlmClient: explicit gpt-* model picks OpenAI', () => {
+test('pickLlmClient: explicit gpt-* model picks OpenAI (wrapped in RetryingLlmClient)', () => {
   withEnv({ ANTHROPIC_API_KEY: 'sk-ant-fake', OPENAI_API_KEY: 'sk-fake' }, () => {
     const { client, providerName } = pickLlmClient({ model: 'gpt-4o' });
     assert.equal(providerName, 'openai');
-    assert.ok(client instanceof OpenAIClient);
+    assert.ok(client instanceof RetryingLlmClient);
+    assert.ok(client.inner instanceof OpenAIClient);
   });
 });
 
@@ -71,7 +75,8 @@ test('pickLlmClient: no model + both keys set → prefer Anthropic', () => {
   withEnv({ ANTHROPIC_API_KEY: 'sk-ant-fake', OPENAI_API_KEY: 'sk-fake' }, () => {
     const { client, providerName } = pickLlmClient({});
     assert.equal(providerName, 'anthropic');
-    assert.ok(client instanceof AnthropicClient);
+    assert.ok(client instanceof RetryingLlmClient);
+    assert.ok(client.inner instanceof AnthropicClient);
   });
 });
 
