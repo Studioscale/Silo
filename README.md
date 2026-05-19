@@ -95,6 +95,30 @@ Most AI memory systems work like this:
 
 ## Prerequisites
 
+### Runtime
+
+- **Node.js 20 or newer** (production runs on Node 24).
+- A platform build toolchain BEFORE running `npm install`, so the
+  optional `fs-ext` dependency can compile. Without it, Silo runs in
+  single-process mode: the in-process mutex still serializes writes
+  within one Node process, but **a second concurrent silo writer in a
+  different process is not safe**. Fine for single-user CLI use;
+  unsafe when crons + interactive commands + MCP can race.
+
+  | Platform        | Toolchain install                                                              |
+  |-----------------|--------------------------------------------------------------------------------|
+  | Debian / Ubuntu | `apt install build-essential`                                                  |
+  | Fedora / RHEL   | `dnf groupinstall "Development Tools"`                                         |
+  | macOS           | `xcode-select --install`                                                       |
+  | Windows         | Either install C++ Build Tools, or accept degraded single-process mode (fs-ext is a no-op on Windows) |
+
+  After the toolchain is in place: `npm install`. On platforms without
+  a toolchain, the build silently skips `fs-ext` and the runtime logs a
+  one-time `silo: running in single-process mode` warning the first
+  time a writer initializes.
+
+### LLM provider (only for `silo extract` + `silo curate`)
+
 Silo's manual operations (`silo write`, `silo read`, `silo search`, regeneration, MCP bridge) work standalone — no LLM required.
 
 The two automated pipelines need an LLM provider:
@@ -112,6 +136,21 @@ Set one of the following environment variables before running them:
 If both keys are set, Anthropic is preferred. Override the default with `--model=<id>` — the provider is auto-detected from the model prefix (`claude-*` → Anthropic, `gpt-*` / `o<digit>` / `chatgpt-*` → OpenAI).
 
 Without a provider configured, `silo curate` and `silo extract` fail fast with an `ANTHROPIC_API_KEY or OPENAI_API_KEY required` error. All other commands work as-is.
+
+### Running the MCP bridge under systemd
+
+If you want to run `silo-mcp/` as a long-lived MCP server for Claude
+Code / Claude Desktop / IDE consumers, the conventional layout splits
+the git checkout from the runtime path so `git pull` stays safe:
+
+- `/opt/silo/` — git checkout of this repo
+- `/opt/silo-mcp/` — runtime path the systemd unit serves (gets a
+  copy of `silo-mcp/server.js` + `notices.js`, plus its own
+  `node_modules/` and `.env`)
+
+`scripts/deploy-silo-mcp.example.sh` is a template deploy script
+covering this pattern. Edit the path constants at the top and `chmod
++x` it, then run after each `git pull` to refresh the bridge.
 
 ## Quick start
 
