@@ -18,12 +18,32 @@ import { regenerateAllEventLogs } from './regenerate-event-log.js';
 import { buildPendingSuggestionsEnvelope } from './regenerate-pending-suggestions.js';
 
 /**
- * Atomic write: write to <path>.tmp then rename over <path>.
+ * Atomic + durable write — write to a unique tmp path, fsync, rename.
+ *
+ * Audit follow-ups baked into this function:
+ *   - Unique tmp filename (`${pid}.${ts}.tmp`) so two concurrent
+ *     regenerators don't trample each other's tmp file before rename.
+ *     update-check-worker.js already does this for the same reason.
+ *   - fh.sync() before rename so a power loss between writeFile + rename
+ *     leaves either nothing or the complete new content (atomicity already
+ *     held; durability now does too). Projections are regenerable from
+ *     the log so this is low-severity hardening, but cheap.
+ *
+ * Parent-directory fsync is deliberately skipped — projections live in a
+ * predictable dir tree (events/, topics/) that `silo regenerate` recreates
+ * idempotently. The dir entry isn't unique enough to be worth the extra
+ * fsync; if metadata loss strands the rename, the next regen re-emits.
  */
 async function atomicWrite(path, content) {
   await fs.mkdir(dirname(path), { recursive: true });
-  const tmp = path + '.tmp';
-  await fs.writeFile(tmp, content, 'utf8');
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const fh = await fs.open(tmp, 'w');
+  try {
+    await fh.writeFile(content, 'utf8');
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
   await fs.rename(tmp, path);
 }
 
