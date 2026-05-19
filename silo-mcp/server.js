@@ -186,6 +186,18 @@ function successResult(data) {
   return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
 }
 
+// M3 admission-gate error surfacing — the silo CLI dispatcher prints
+// `silo <cmd>: ADMISSION_REFUSED:<code> — <details>` when LogWriter's
+// matrix gate refuses a write (proposals/m3-admission-gate.md §5.1).
+// Pull the code out of stderr so MCP callers see a structured admission
+// failure distinct from generic CLI / payload-validation errors.
+const ADMISSION_RE = /ADMISSION_REFUSED:([A-Z_]+) —/;
+function extractAdmissionCode(stderr) {
+  if (!stderr) return null;
+  const m = stderr.match(ADMISSION_RE);
+  return m ? m[1] : null;
+}
+
 function todayStr() {
   // Use BRT (UTC-3)
   const now = new Date();
@@ -694,6 +706,11 @@ server.tool(
         ...(confidence ? ['--confidence=' + confidence] : []),
       ], { encoding: 'utf-8' });
       if (writeCmd.status !== 0) {
+        const admissionCode = extractAdmissionCode(writeCmd.stderr);
+        if (admissionCode) {
+          return errorResult(admissionCode,
+            'admission gate refused write: ' + (writeCmd.stderr || 'unknown'));
+        }
         return errorResult('SILO_WRITE_FAILED',
           'silo CLI rejected write: ' + (writeCmd.stderr || writeCmd.stdout || 'unknown'));
       }
@@ -821,8 +838,11 @@ server.tool(
     const r = spawnSync('node', args, { encoding: 'utf-8' });
     if (r.status !== 0) {
       // SuggestionOpError code is printed on stderr; pluck it for caller.
+      // M3: scan for ADMISSION_REFUSED token first; fall back to the
+      // existing SuggestionOpError code regex.
+      const admissionCode = extractAdmissionCode(r.stderr);
       const m = (r.stderr || '').match(/silo suggest --accept: ([A-Z_]+) —/);
-      const code = m ? m[1] : 'ACCEPT_FAILED';
+      const code = admissionCode || (m ? m[1] : 'ACCEPT_FAILED');
       return errorResult(code, r.stderr || r.stdout || 'accept failed');
     }
     const accepted = JSON.parse(r.stdout);
@@ -867,8 +887,11 @@ server.tool(
     if (reason) args.push(`--reason=${reason}`);
     const r = spawnSync('node', args, { encoding: 'utf-8' });
     if (r.status !== 0) {
+      // M3: scan for ADMISSION_REFUSED token first; fall back to the
+      // existing SuggestionOpError code regex.
+      const admissionCode = extractAdmissionCode(r.stderr);
       const m = (r.stderr || '').match(/silo suggest --dismiss: ([A-Z_]+) —/);
-      const code = m ? m[1] : 'DISMISS_FAILED';
+      const code = admissionCode || (m ? m[1] : 'DISMISS_FAILED');
       // Try to extract the structured `invalid` detail JSON if present.
       let detail = null;
       const detailMatch = (r.stderr || '').match(/(\{[\s\S]*\})/);
