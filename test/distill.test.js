@@ -318,6 +318,7 @@ test('distill integration: entries land in state via LogWriter + interpret', asy
   await writer.init();
   await writer.append({
     type: 'PRINCIPAL_DECLARED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'i:p1',
     principal: 'bootstrap',
@@ -326,6 +327,7 @@ test('distill integration: entries land in state via LogWriter + interpret', asy
   });
   await writer.append({
     type: 'PRINCIPAL_ACCESS_ENABLED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'i:p2',
     principal: 'bootstrap',

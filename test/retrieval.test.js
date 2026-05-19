@@ -15,6 +15,7 @@ async function seedCorpus() {
   // Declare + enable principals
   await writer.append({
     type: 'PRINCIPAL_DECLARED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'i:d1',
     principal: 'operator',
@@ -23,6 +24,7 @@ async function seedCorpus() {
   });
   await writer.append({
     type: 'PRINCIPAL_DECLARED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'i:d2',
     principal: 'operator',
@@ -62,6 +64,7 @@ async function seedCorpus() {
   // Seal it to alice + operator only
   await writer.append({
     type: 'ACL_SEALED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'i:seal',
     principal: 'operator',

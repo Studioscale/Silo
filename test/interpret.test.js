@@ -18,6 +18,7 @@ async function freshSilo() {
 async function seedBasicLog(writer) {
   await writer.append({
     type: 'PRINCIPAL_DECLARED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'intent:decl1',
     principal: 'operator',
@@ -26,6 +27,7 @@ async function seedBasicLog(writer) {
   });
   await writer.append({
     type: 'PRINCIPAL_UID_BOUND',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'intent:uid1',
     principal: 'operator',
@@ -34,6 +36,7 @@ async function seedBasicLog(writer) {
   });
   await writer.append({
     type: 'PRINCIPAL_ACCESS_ENABLED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'intent:acc1',
     principal: 'operator',
@@ -135,6 +138,7 @@ test('interpret: RECOVERY_MODE_ENTERED / EXITED toggles current_mode', async () 
   const { writer } = await freshSilo();
   await writer.append({
     type: 'RECOVERY_MODE_ENTERED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'intent:rec1',
     principal: 'operator',
@@ -146,6 +150,7 @@ test('interpret: RECOVERY_MODE_ENTERED / EXITED toggles current_mode', async () 
 
   await writer.append({
     type: 'RECOVERY_MODE_EXITED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'intent:rec2',
     principal: 'operator',
@@ -172,6 +177,7 @@ test('interpret: ACL_SEALED updates acl_table', async () => {
 
   await writer.append({
     type: 'ACL_SEALED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'intent:seal1',
     principal: 'operator',
@@ -220,6 +226,7 @@ test('interpret: TOPIC_BULLETS_RETIRED populates retired_curated_seqs', async ()
   const { writer } = await freshSilo();
   await writer.append({
     type: 'PRINCIPAL_DECLARED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'intent:p1',
     principal: 'operator',
@@ -228,6 +235,7 @@ test('interpret: TOPIC_BULLETS_RETIRED populates retired_curated_seqs', async ()
   });
   await writer.append({
     type: 'PRINCIPAL_ACCESS_ENABLED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'intent:p2',
     principal: 'operator',
@@ -300,6 +308,7 @@ test('interpret: TOPIC_BULLETS_RETIRED with malformed payload does not throw', a
   const { writer } = await freshSilo();
   await writer.append({
     type: 'PRINCIPAL_DECLARED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'intent:p1',
     principal: 'operator',

@@ -26,6 +26,7 @@ async function freshImportedSilo() {
   // Seed operator
   await writer.append({
     type: 'PRINCIPAL_DECLARED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'i:op1',
     principal: 'bootstrap',
@@ -34,6 +35,7 @@ async function freshImportedSilo() {
   });
   await writer.append({
     type: 'PRINCIPAL_ACCESS_ENABLED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'i:op2',
     principal: 'bootstrap',

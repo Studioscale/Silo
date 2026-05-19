@@ -23,6 +23,7 @@ async function freshSilo() {
   await writer.init();
   await writer.append({
     type: 'PRINCIPAL_DECLARED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'i:op1',
     principal: 'bootstrap',
@@ -31,6 +32,7 @@ async function freshSilo() {
   });
   await writer.append({
     type: 'PRINCIPAL_ACCESS_ENABLED',
+    socket: 'admin',
     isStateBearing: true,
     intentId: 'i:op2',
     principal: 'bootstrap',
