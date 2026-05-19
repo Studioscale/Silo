@@ -197,6 +197,31 @@ the git checkout from the runtime path so `git pull` stays safe:
 covering this pattern. Edit the path constants at the top and `chmod
 +x` it, then run after each `git pull` to refresh the bridge.
 
+### Universal-client surface (Stage 1 + Stage 2)
+
+For generic MCP clients (ChatGPT custom connectors, Anthropic Console
+test harness, homegrown clients) the bridge exposes two protocol-level
+tools so the rules that CLAUDE.md gives Claude Code travel with the
+server itself:
+
+- **`silo_bootstrap`** — call ONCE per session, cache the response.
+  Returns the structured contract: memory model (Zone A/B + Layers
+  1/2/3), retrieval order, write policy, tool catalog, and
+  `contract_version` for forward-compat parsing.
+- **`silo_context_pack_v0`** — best first call for a vague task. Given
+  a free-form `task` description, returns a small bundle of relevant
+  topics + Layer 2 excerpts plus a confidence rating and recommended
+  next tool calls. Ranking is BM25-deterministic via the silo CLI;
+  the `v0` suffix is explicit — Stage 3 can swap in smarter ranking
+  without changing the tool's API surface.
+
+Plus the OpenAI-compatible `fetch` tool (Stage 1) and enriched
+`search` results carrying stable IDs. See
+[reference/adapting-to-other-platforms.md](reference/adapting-to-other-platforms.md)
+for the full client contract and
+[proposals/universal-client-protocol.md](proposals/universal-client-protocol.md)
+for the design note (versioning policy, Stage 3 roadmap).
+
 ## Quick start
 
 - **OpenClaw:** [quickstart/openclaw/SETUP.md](quickstart/openclaw/SETUP.md) — Full setup with automated pipelines (~30 minutes)
