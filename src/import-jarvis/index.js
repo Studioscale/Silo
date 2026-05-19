@@ -304,11 +304,16 @@ export async function importTopicFile({ path, text, writer, principal, filename 
     eventsEmitted.push(result.seq);
   }
 
-  // 4) Apply sensitivity → ACL_SEALED if private (admin-only per v12.5 matrix;
-  //    import runs as trusted system action so emit via operator principal)
+  // 4) Apply sensitivity → ACL_SEALED if private (admin-only per v12.5 matrix
+  //    + M3 admission gate; import runs as a trusted system action that
+  //    explicitly opts into the admin socket for this single emission. Every
+  //    other writer.append in this import stays on the default standard
+  //    socket — the per-call socket lets us mix without elevating the whole
+  //    import to admin).
   if (frontmatter.sensitivity === 'private') {
     const sealResult = await writer.append({
       type: 'ACL_SEALED',
+      socket: 'admin',
       isStateBearing: true,
       intentId: `intent:${uuidv7()}`,
       principal: 'operator',
