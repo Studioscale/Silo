@@ -67,6 +67,26 @@ ChatGPT custom connectors connect MCP servers as "apps" the model can invoke. As
 
 If you're building a fresh custom connector against `silo-mcp`, the design note (`proposals/universal-client-protocol.md`) documents the versioning policy, the capabilities-vs-contract_version axes, and the Stage 3 roadmap for smarter ranking.
 
+### Versioning your silo data directory
+
+Some users sync their `/path/to/silo-data/` across machines via git (bare remote, syncthing, etc.). Silo writes per-machine artifacts into that directory that should NOT be versioned:
+
+```gitignore
+# Inside <silo-dir>/.gitignore — or in your tracking repo's ignore list
+
+# Per-machine update-check cache (Phase 2.3). Written on first CLI use;
+# never portable across hosts.
+update-status.json
+
+# Cross-process lock files (fs-ext flock target). Created lazily.
+.locks/
+
+# Local-dev convenience: temp + test artifacts
+*.tmp
+```
+
+The operation log itself (`operation-log/*.jsonl`) IS the source of truth and SHOULD be versioned if you're syncing memory across machines. Same for any topic files in Zone B if you're committing the projection alongside.
+
 ---
 
 ## Core requirements (any platform)

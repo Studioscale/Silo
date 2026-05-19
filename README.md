@@ -380,6 +380,7 @@ read-path integrity (hash chain) are different defenses.
 - [reference/extraction-pipeline.md](reference/extraction-pipeline.md) — How session extraction works
 - [reference/topic-suggestion-pipeline.md](reference/topic-suggestion-pipeline.md) — How topic detection works
 - [reference/comparison.md](reference/comparison.md) — Silo vs MEMORY.md vs MemPalace vs SimpleMem
+- [CHANGELOG.md](CHANGELOG.md) — release history + migration notes (read this before upgrading from a pre-0.2.0 install)
 
 ## Origin
 
