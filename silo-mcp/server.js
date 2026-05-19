@@ -18,6 +18,7 @@ import {
   fetchTopic,
   enrichSearchResults,
 } from './fetch.js';
+import { buildBootstrapContract } from './bootstrap-contract.js';
 
 // Tool-annotation hints (MCP SDK 1.29+). readOnlyHint/idempotentHint inform
 // generic clients about side-effect posture; OpenAI Apps SDK security
@@ -218,6 +219,44 @@ function regenerateAfterWrite() {
 // ── Tool Registration ─────────────────────────────────────────────────────
 
 function registerTools(server) {
+
+// ── Tool: silo_bootstrap (Stage 2 — universal-client compat) ───────────────
+//
+// Returns the structured contract describing Silo's memory model, retrieval
+// rules, write policy, and tool catalog. Generic MCP clients (e.g. ChatGPT)
+// call this ONCE per session to learn the rules that CLAUDE.md gives a
+// Claude Code session — there is no equivalent project-side instruction
+// surface for non-Claude-Code clients.
+//
+// registerTool (vs. tool()) so the response declares outputSchema. The
+// handler returns BOTH structuredContent (machine-readable) AND
+// content[0].text (JSON-encoded) per OpenAI MCP guidance — older clients
+// that ignore structuredContent still get the JSON payload as text.
+
+server.registerTool(
+  'silo_bootstrap',
+  {
+    description: 'Return Silo\'s universal-client contract: memory model, retrieval rules, write policy, and tool catalog. Read-only. Call ONCE per new client session and cache the result; do not call repeatedly. This is the rule book non-Claude-Code clients need before invoking other Silo tools.',
+    inputSchema: {},
+    outputSchema: {
+      system: z.string(),
+      purpose: z.string(),
+      contract_version: z.string(),
+      capabilities: z.object({}).passthrough(),
+      rules: z.object({}).passthrough(),
+      memory_model: z.object({}).passthrough(),
+      tools: z.object({}).passthrough(),
+    },
+    annotations: READ_ONLY,
+  },
+  async () => {
+    const contract = buildBootstrapContract();
+    return {
+      structuredContent: contract,
+      content: [{ type: 'text', text: JSON.stringify(contract, null, 2) }],
+    };
+  },
+);
 
 // ── Tool 1: read_index ─────────────────────────────────────────────────────
 
