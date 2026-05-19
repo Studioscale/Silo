@@ -292,29 +292,47 @@ operators know what's enforced vs. what's roadmap:
 trusted operator. The `silo` CLI, the MCP bridge (behind a bearer token),
 and the cron scripts (`silo-curate.sh`, `silo-detect.sh`) all share the
 same `LogWriter` and write at the same trust level. There is no
-multi-principal authorization at write time today — the matrix in
-`src/matrix/matrix.yaml` describes admission cells per `(socket, mode)`
-but `LogWriter._appendBatchUnlocked` does not yet call
-`Matrix.isAdmissible()` to enforce them. That wiring (and the
-corresponding socket/mode propagation through call sites) is M3 work.
-Until then, an admin-only event type (`ACL_SEALED`, `PRINCIPAL_*`,
-`RECOVERY_MODE_*`) can be emitted through any write path the operator
-controls.
+multi-principal authorization at write time today (no per-user OAuth, no
+per-token capability restrictions) — that's roadmap work behind a future
+multi-tenant deployment.
 
 **What IS enforced at write time today:**
+- **Matrix admission gate** (M3, `src/log/append.js` +
+  `src/log/admission-error.js`): `LogWriter._appendBatchUnlocked` calls
+  `Matrix.isAdmissible(type, socket, 'normal')` for every staged entry
+  before payload validation. Admin-only event types (`ACL_SEALED`,
+  `PRINCIPAL_*`, install/feature/tag/broker meta) are rejected on the
+  standard socket with `AdmissionError('EVENT_NOT_ADMISSIBLE')`; unknown
+  event types are rejected with `UNKNOWN_EVENT_TYPE_NOT_REGISTERED`;
+  `mode != 'normal'` is rejected with `INVALID_WRITER_MODE` (broker
+  modes are reserved-but-unimplemented). The CLI dispatcher surfaces
+  these as `ADMISSION_REFUSED:<code>` on stderr; the MCP bridge picks
+  up the token and forwards it to AI clients distinct from
+  `INVALID_EVENT_PAYLOAD`. Call sites that legitimately emit admin
+  events (`silo init`, `silo import-jarvis`'s `ACL_SEALED` line) pass
+  `socket: 'admin'` explicitly per call.
 - **Per-event-type payload validation** (`src/admission/payload-validators.js`):
   `write_event`, `TOPIC_BULLETS_RETIRED`, `TOPIC_METADATA_SET`,
   `TOPIC_SUGGESTED`, `TOPIC_SUGGESTION_ACCEPTED`,
   `TOPIC_SUGGESTION_DISMISSED` all have hand-coded validators that
   reject unknown fields, out-of-range values, and (where applicable)
   multi-line content for tags that project to single-line markdown.
-  Other event types pass through admission without payload checks today
-  — see the file's header comment for the full list.
+  Other event types pass through payload checks today — see the file's
+  header comment for the full list. (The admission gate above runs
+  BEFORE payload validation, so admin-only types never reach the
+  validator if the socket is wrong.)
 - **Slug canonical form**: all slugs at admission match
   `^[a-z0-9]+(-[a-z0-9]+)*$` with length 2..40. The extraction parser
   (`src/distill/parse.js`) was tightened to the same regex so an
   LLM-emitted slug can't land via `write_event` and then be rejected
   later by `TOPIC_METADATA_SET`.
+
+**Layering note (M3):** the admission gate protects callers that go
+through `LogWriter`. It does NOT stop a process with raw filesystem
+write access from appending directly to
+`/root/.silo/operation-log/*.jsonl`. The hash-chain verification at
+read time catches such tampering. Write-path authorization (M3) and
+read-path integrity (hash chain) are different defenses.
 
 **What IS verified at read time:**
 - **Hash chain integrity**: `interpret()` checks
