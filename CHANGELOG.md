@@ -4,8 +4,15 @@ All notable changes to Silo. Format loosely based on [Keep a Changelog](https://
 
 ## [Unreleased]
 
+(nothing pending)
+
+## [0.2.1] — 2026-05-24
+
+UX polish release. CLI + docs only — no MCP bridge changes, no schema changes, no migration steps. Existing 0.2.0 installations continue to work without reconfiguration; this release adds a `--version` flag, sharper admission error messages, and a recommended Claude Code CLAUDE.md addition for batch-save behavior.
+
 ### Added
 - `silo --version` / `silo -v` / `silo version` — print the version and exit. Same value `silo doctor` shows; just shorter to type.
+- **Recommended CLAUDE.md catch-up directive for Claude Code + MCP users.** New "Recommended: catch-up directive for the Silo MCP bridge" section in [`quickstart/claude-code/SETUP.md`](quickstart/claude-code/SETUP.md). Drop-in rule for `~/.claude/CLAUDE.md` that codifies how the assistant should respond to "save to silo" / "catch up silo" / similar — retrospectively scan the conversation, write any silo-worthy events via `mcp__silo__write_event`, acknowledge inline as one short sentence, no confirmation prompts. Useful both as a safety net for what the in-the-moment `write_event` discipline missed AND as a cross-instance coordination tool when running parallel Claude Code instances against the same project.
 
 ### Changed
 - `AdmissionValidationError` messages now inline `actual=` / `max=` / `tag=` from the detail object so the failure mode is readable without inspecting `.detail` programmatically. Field-specific hints added for the two `write_event` content rejections (length cap, multi-line for event-log tags) pointing at the right workaround (`tag=CURATED` for ≤50 KB Layer-2 sections, `tag=SOURCE` for ≤200 KB Layer-3 blockquotes).
