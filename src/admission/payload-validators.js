@@ -7,6 +7,7 @@
  *
  * Currently validated event types (each with its own per-type validator
  * dispatched from the switch in validatePayloadForAppend below):
+ *   - write_event                    (0.2.0 — slug regex, tag set, per-tag content caps)
  *   - TOPIC_BULLETS_RETIRED          (Phase 2.1)
  *   - TOPIC_METADATA_SET             (Phase 2.2)
  *   - TOPIC_SUGGESTED                (Phase 2.2)
@@ -14,9 +15,8 @@
  *   - TOPIC_SUGGESTION_DISMISSED     (Phase 2.2)
  *
  * Other event types pass through admission without payload validation today
- * (write_event, TOPIC_VERIFIED, TOPIC_CURATED, principal/feature/ACL events,
- * install / recovery / matrix-meta events). The roadmap follow-up below
- * tracks the broader gate.
+ * (TOPIC_VERIFIED, TOPIC_CURATED, principal/feature/ACL events,
+ * install / recovery / matrix-meta events).
  *
  * Scope: structural validation + prior-seq sanity. NOT semantic referential
  * validation — "seq exists as a CURATED bullet on the same topic" remains
@@ -30,9 +30,10 @@
  *   - Throw structured AdmissionValidationError, not plain Error
  *   - Validator stays write-only; interpret() retains tolerance via state.skipped
  *
- * Followup task (tracked outside this module): wire Matrix.isAdmissible() as a
- * complete write-time gate combined with this payload validation. Today's
- * validators enforce payload shape only, not (type, socket, mode) admission.
+ * (type, socket, mode) admission is NOT this module's job — it shipped as the
+ * M3 matrix gate: LogWriter._appendBatchUnlocked calls Matrix.isAdmissible()
+ * BEFORE dispatching to these payload validators (src/log/append.js). This
+ * module enforces payload shape only.
  */
 
 export const MAX_SUPERSEDED_SEQS = 256;
@@ -109,8 +110,8 @@ function formatAdmissionMessage({ eventType, field, reason, detail }) {
 /**
  * Validate an entry's payload before LogWriter appends it.
  *
- * Currently only TOPIC_BULLETS_RETIRED has admission-time validation.
- * Other event types pass through unchanged.
+ * Six event types carry admission-time payload validation (see the switch
+ * below); all other event types pass through unchanged.
  *
  * @param {Object} entry - the entry about to be written. Reads { type, payload }.
  * @param {Object} [ctx] - context from the writer.

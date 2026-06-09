@@ -4,7 +4,7 @@ A structured memory architecture for AI assistants that actually works across se
 
 Silo replaces flat memory files (like OpenClaw's `MEMORY.md` or Claude Code's built-in memory) with a three-layer topic file system, a tagged event log, and automated extraction/curation pipelines. The result: your AI assistant remembers what matters, forgets what doesn't, and can tell you *when* and *why* something changed.
 
-> **Status (2026-04):** v12.5 in production on a single-user Hetzner VPS managing ~25 knowledge domains. 129 unit tests passing. Spec finalized after 57 audit rounds across 19 drafts (three independent reviewers per round — Claude, ChatGPT, Gemini). Implementation in [`src/`](src/), described in [IMPLEMENTATION.md](IMPLEMENTATION.md).
+> **Status (2026-06):** v0.2.1 (implementing the v12.5 spec) in production on a single-user Hetzner VPS managing ~25 knowledge domains. 494 unit tests passing. Spec finalized after 57 audit rounds across 19 drafts (three independent reviewers per round — Claude, ChatGPT, Gemini). Implementation in [`src/`](src/), described in [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
 ```
                 Telegram / IDE / MCP client
@@ -367,7 +367,10 @@ read-path integrity (hash chain) are different defenses.
 - Token revocation / rotation (rotate `SILO_MCP_TOKEN` + restart the
   systemd unit).
 - Backup of `/root/.silo/` (operator's responsibility — Silo doesn't
-  schedule its own backups).
+  schedule its own backups; a reference nightly-snapshot script ships at
+  [`scripts/silo-backup.sh`](scripts/silo-backup.sh) — tar.gz with
+  integrity check + count-based rotation, safe against a live writer
+  because the log recovers any torn trailing line on read).
 - Network-level access control to the MCP endpoint (the bridge listens
   on 127.0.0.1 by default; expose via reverse proxy + your normal TLS +
   firewall posture).

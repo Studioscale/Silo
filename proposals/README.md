@@ -39,3 +39,5 @@ Design notes document SHIPPED architecture decisions + roadmap intent. Not imple
 ## Full audit history
 
 Preserved at `../../silo-design-history/` (sibling folder, outside this repo) — keeps this repo clean for open-source distribution while preserving traceability for the design decisions.
+
+Layout convention: archive folders are numbered chronologically (`NN-<name>-archive/`) so they sort by when the design work happened. New audit bundles land there, not in this repo and not on the Desktop. See `silo-design-history/README.md` for the catalog and naming rules for future audits.

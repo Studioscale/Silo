@@ -7,6 +7,9 @@ All notable changes to Silo. Format loosely based on [Keep a Changelog](https://
 ### Added
 - **`scripts/silo-backup.sh`** — reference nightly snapshot of the silo data dir (`tar.gz` + integrity test + count-based rotation, default keep-14). Count-based rotation chosen over age-based so a silently-stalled backup cron freezes the archive set instead of draining it to zero. Hot-copy safe: the operation log's replay-safe prefix recovery means a snapshot taken mid-write is still a valid restorable log. Emits `[FACT] system:` status events (`source=silo-backup`) bookending each run, same pattern as curate/detect.
 
+### Fixed
+- README §Status: stale test count (129 → 494) and stale date; now also names the npm version (0.2.1) alongside the v12.5 spec lineage.
+- `src/admission/payload-validators.js` header comments no longer claim `write_event` is unvalidated (it has been since 0.2.0) and no longer track the M3 matrix-gate wiring as a pending follow-up (it shipped — the gate runs in `LogWriter._appendBatchUnlocked` before payload validation).
 
 ## [0.2.1] — 2026-05-24
 
