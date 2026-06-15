@@ -4,6 +4,25 @@ All notable changes to Silo. Format loosely based on [Keep a Changelog](https://
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-06-15
+
+Curate-liveness — a passive `_silo_notices` "check-engine light" that warns when the nightly curation job hasn't *succeeded* in ~3 days. Motivated by a ~10-day silent curate outage in May: `scripts/silo-curate.sh` lost its executable bit and the kernel refused to exec it, so it died *before its first line ran* — its own heartbeat (`run started` / `run failed`) never got the chance to fire. The fix sources the staleness signal **out-of-band** from curate (in detect's cron, structurally alive when curate is dead) **and** in-band (curate's own `EXIT` trap, for instant recovery reflection), plus a read-path freshness guard so even a both-crons-dead outage isn't fully dark. Additive: a new CLI verb + a read-path consumer on the existing notice rail + two cron traps — no schema or log-format change. Ratified design (multi-reviewer gauntlet, round-2 converged): [`proposals/curate-liveness.md`](proposals/curate-liveness.md).
+
+(0.2.3 is reserved for the planned CLI slug-guidance change and is unreleased; liveness ships as 0.2.4 per the ratified implementation order.)
+
+### Added
+- **`silo curate-status`** — pre-computes the curate-liveness verdict into `<silo-dir>/curate-status.json` from the operation log (its own `interpret()` fold → `deriveCuratorStatus` → `foldLiveness`, atomic write). Run by both nightly crons via an `EXIT` trap; **excluded from the update-check auto-fire gate** (it's a cron-frequency call and stays side-effect-free). Never fails a cron — a fresh silo with no curate events writes a valid never-succeeded record and exits 0.
+- **Passive notices on the `_silo_notices` rail.** `curate_liveness_stale` (curate hasn't succeeded in N days; the message branches on silent-death vs failed-run vs wedged/in-progress so the next operator gets the diagnosis hint for free); `curate_never_succeeded` (no successful curate since the silo was first observed, past a grace window); and `curate_monitor_stale` / `curate_monitor_unreadable` (the monitor's own writer is dead, or its cache file is corrupt — the both-crons-dead freshness guard, computed from the cache file's `mtime` with **no** log fold, so it works precisely when the cron that would fold is dead).
+- **Hysteresis + cooldown, biased toward silence.** Separate `STALE_DAYS=3` / `CLEAR_DAYS=1` thresholds give a 2-day dead band (Schmitt trigger — the verdict can't flap night-to-night around one boundary), and a shared 6h per-emit cooldown (`curate-emit.json`) collapses a read-burst in one session to ~one mention. 24h is the documented conservative knob if fatigue recurs.
+- **`SILO_DISABLE_CURATE_LIVENESS`** — a *separate* opt-out from `SILO_DISABLE_UPDATE_CHECK`, so silencing update-fatigue does not also blind curate-death.
+- **`EXIT` traps in `scripts/silo-curate.sh` + `scripts/silo-detect.sh`** — refresh the cache on every exit path including an early `exit` (a trailing `|| true` line would be skipped), registered *after* the flock so a flock-fail skip correctly does not fire them (the instance already running writes the status).
+- New tests across `test/curate-liveness.test.js` (verdict / hysteresis / in-progress / first-run / cache I/O), `test/curate-status-cli.test.js` (CLI end-to-end + the writer→read-path contract the bridge glues), and `test/mcp-notices.test.js` (cooldown, monitor-freshness, opt-out independence, the discriminated-envelope contract, cache isolation).
+
+### Changed
+- **`deriveCuratorStatus` moved to `src/util/curate-liveness.js`** (from `src/cli/silo.js`) and exported, so the new subcommand *and* unit tests reuse it. `cmdDoctor` still renders the "Curate status" readout live and does **not** read the cache — doctor stays the independent live-fold backstop for the both-crons-dead case. It now also reports `last_event_kind` (the most-recent heartbeat's kind) so an in-progress run is identified by event *ordering*, not by the failure message that `deriveCuratorStatus` preserves across a later `run started`.
+
+The dual-writer race the design panel converged on as the one blocker is **structurally absent**: the cron writes `curate-status.json`, the read path writes `curate-emit.json`, and no two processes ever read-modify-write the same file.
+
 ## [0.2.2] — 2026-06-14
 
 `silo retire` — a first-class, audited primitive to retire curated Layer-2 bullets on demand. Additive (new CLI verb + MCP tool + ops module) plus one hardening edit to the curate command's retire emission. No schema or log-format change; rides the existing `TOPIC_BULLETS_RETIRED` event type. Ratified design (multi-reviewer gauntlet + independent source re-verification): [`proposals/retire-primitive.md`](proposals/retire-primitive.md).

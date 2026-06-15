@@ -11,7 +11,10 @@ import {
   buildSiloNotices,
   loadPendingSuggestions,
   loadUpdateStatus,
+  loadCurateStatus,
+  loadCurateEmit,
   isUpdateOptOut,
+  isCurateLivenessOptOut,
 } from './notices.js';
 import {
   parseFetchId,
@@ -63,6 +66,13 @@ const PENDING_SUGGESTIONS_PATH = join(SILO_BASE, 'PENDING-SUGGESTIONS.json');
 // round-1 ChatGPT F2 fix — the MCP server was previously reading from the
 // projection target by default, which the CLI never writes.
 const UPDATE_STATUS_PATH = join(SILO_DIR, 'update-status.json');
+// Curate-liveness caches live under SILO_DIR (the data dir) alongside
+// update-status.json — the CLI writes them there, the bridge reads them.
+// curate-status.json: cron-written verdict. curate-emit.json: read-path-written
+// cooldown stamp (this server is its ONLY writer — the split is the dual-writer
+// race fix, SPEC-curate-liveness §5.5).
+const CURATE_STATUS_PATH = join(SILO_DIR, 'curate-status.json');
+const CURATE_EMIT_PATH = join(SILO_DIR, 'curate-emit.json');
 const HANDOFF_DIR = join(SILO_BASE, 'handoff/cc-to-jarvis');
 const HANDOFF_PROCESSED_DIR = join(HANDOFF_DIR, 'processed');
 
@@ -253,10 +263,16 @@ function todayStr() {
 // SILO_DISABLE_UPDATE_CHECK is not set (spec §3.6 / §5).
 async function siloNoticesForRead() {
   const updateStatus = await loadUpdateStatus(UPDATE_STATUS_PATH);
+  const curateStatus = await loadCurateStatus(CURATE_STATUS_PATH); // discriminated envelope (L1/L2)
+  const curateEmit = await loadCurateEmit(CURATE_EMIT_PATH);
   return buildSiloNotices({
     pendingPath: PENDING_SUGGESTIONS_PATH,
     updateStatus,
     updateCheckDisabled: isUpdateOptOut(),
+    curateStatus,
+    curateEmit,
+    curateLivenessDisabled: isCurateLivenessOptOut(),
+    curateEmitPath: CURATE_EMIT_PATH,
   });
 }
 

@@ -69,6 +69,12 @@ import {
   HEALTHY_FAILURE_THRESHOLD,
 } from '../util/update-check.js';
 import {
+  deriveCuratorStatus,
+  foldLiveness,
+  readCurateStatus,
+  writeCurateStatus,
+} from '../util/curate-liveness.js';
+import {
   looksLikeLlmError,
   formatLlmErrorForCli,
 } from '../distill/llm-errors.js';
@@ -1301,52 +1307,35 @@ function formatTs(iso) {
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 }
 
-/**
- * Derive curate health from system-slug events with source=silo-curate.
- * Same pattern as deriveDetectorStatus in regenerate-pending-suggestions.js
- * (which parses source=silo-topic-detector events for detector_status).
- *
- * Content prefixes the cron wrapper emits:
- *   "silo-curate run started (run_id=...)"
- *   "silo-curate run complete (run_id=...)"
- *   "silo-curate run failed (run_id=..., exit=N)"
- */
-function deriveCuratorStatus(state) {
-  const events = state.topic_content.get('system') ?? [];
-  const curateEvents = events.filter((e) => {
-    if (typeof e.content !== 'string') return false;
-    if (!e.content.startsWith('silo-curate')) return false;
-    const src = state.seq_to_event.get(e.seq)?.source;
-    return src === 'silo-curate';
-  });
+// deriveCuratorStatus moved to src/util/curate-liveness.js (imported above) so
+// cmdCurateStatus and the curate-liveness unit tests can reuse it. cmdDoctor
+// still renders from it live (curate-liveness §6: doctor stays live-fold-only).
 
-  let lastRunAt = null;
-  let lastSuccessAt = null;
-  let lastFailureMsg = null;
-  let consecutiveFailures = 0;
-
-  for (const e of curateEvents) {
-    if (e.content.includes('run started')) {
-      lastRunAt = e.ts;
-    } else if (e.content.includes('run complete')) {
-      lastRunAt = e.ts;
-      lastSuccessAt = e.ts;
-      lastFailureMsg = null;
-      consecutiveFailures = 0;
-    } else if (e.content.includes('run failed')) {
-      lastRunAt = e.ts;
-      lastFailureMsg = e.content;
-      consecutiveFailures += 1;
-    }
-  }
-
-  if (!lastRunAt) return null;
-  return {
-    last_run_at: lastRunAt,
-    last_success_at: lastSuccessAt,
-    consecutive_failures: consecutiveFailures,
-    last_failure_msg: lastFailureMsg,
-  };
+// ── silo curate-status — SPEC-curate-liveness §5.2 ───────────────────────────
+// Pre-compute the curate-liveness verdict into curate-status.json. Does NOT run
+// curate — it only reads the log and writes the verdict cache. Invoked by BOTH
+// cron wrappers via an EXIT trap: detect (04:00) is the out-of-band death
+// detector (it stays alive when curate is dead and can't write its own status);
+// curate (05:00) is the in-band recovery reflector (clears the light the moment
+// a fixed curate succeeds). Writes curate-status.json ONLY — never
+// curate-emit.json (that is the read path's cooldown stamp; the file split is
+// what dissolves the dual-writer race, §5.5). Must never fail a cron: the trap
+// wraps it in `|| true`, and the fresh-silo path (raw=null) writes a valid
+// never-succeeded record and exits 0.
+async function cmdCurateStatus(values) {
+  const siloDir = values['silo-dir'];
+  const now = Date.now();
+  const writer = await openWriter(siloDir);
+  const state = await interpret(writer);
+  const raw = deriveCuratorStatus(state);        // null when no curate events
+  const prior = await readCurateStatus(siloDir); // malformed-prior → null (self-heals)
+  const next = foldLiveness({ raw, prior, now });
+  await writeCurateStatus(siloDir, next);
+  // One operator-readable line for the cron log (>> /var/log/silo-*.log).
+  console.log(
+    `curate-status: is_stale=${next.is_stale} in_progress=${next.in_progress} ` +
+      `last_success=${next.last_success_at ?? '(never)'} computed_at=${next.computed_at}`,
+  );
 }
 
 async function cmdRegenerate({ 'silo-dir': siloDir, to, strict }) {
@@ -1468,7 +1457,14 @@ async function main() {
   // Phase 2.3 §4.3: every CLI command except `silo doctor` fires a detached
   // update-check worker on entry. Spawn is non-blocking — survives this
   // process exiting in <100ms. Respects opt-out + 24h throttle internally.
-  if (command !== 'doctor' && command !== 'help' && command !== 'init') {
+  // curate-status is excluded too — it's a cron-frequency call and must stay
+  // side-effect-free (no detached update-check worker on every nightly run).
+  if (
+    command !== 'doctor' &&
+    command !== 'help' &&
+    command !== 'init' &&
+    command !== 'curate-status'
+  ) {
     try {
       await maybeFireUpdateCheck(values['silo-dir']);
     } catch {
@@ -1513,6 +1509,9 @@ async function main() {
         break;
       case 'doctor':
         await cmdDoctor(values);
+        break;
+      case 'curate-status':
+        await cmdCurateStatus(values);
         break;
       default:
         console.error(`silo: unknown command "${command}"`);
@@ -1561,6 +1560,10 @@ commands:
               --dismiss <seq> | --status | --bulk-scan
   doctor      diagnostic readout; --check-updates forces a fresh GitHub check
               (honors SILO_DISABLE_UPDATE_CHECK; --force overrides)
+  curate-status
+              refresh the curate-liveness cache (curate-status.json) from the
+              log; run by the curate + detect crons. Powers the passive
+              _silo_notices "curation is stale" check-engine light.
   regenerate  rebuild Zone B projections (topic files, event logs,
               TOPIC-INDEX.md, PENDING-SUGGESTIONS.json) from the log.
               --strict refuses to project from a log with chain breaks.

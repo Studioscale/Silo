@@ -5,9 +5,10 @@
  *
  * deriveDetectorStatus is exported from the projection module (it's
  * what powers PENDING-SUGGESTIONS.json's detector_status field).
- * deriveCuratorStatus is only used by cmdDoctor today, so it isn't
- * exported — these tests instead drive the parser through end-to-end
- * `silo doctor` CLI invocations.
+ * deriveCuratorStatus now lives in src/util/curate-liveness.js and is
+ * exported + unit-tested directly there (test/curate-liveness.test.js);
+ * the tests below remain as end-to-end coverage that cmdDoctor still
+ * renders the curate readout correctly through real `silo doctor` runs.
  */
 
 import test from 'node:test';

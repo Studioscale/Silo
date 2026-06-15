@@ -43,6 +43,15 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
+# Curate-liveness check — runs OUT-OF-BAND from silo-curate so a curate outage
+# is detectable even when curate's own heartbeat is dead (detect kept running
+# through the entire 10-day curate outage). A `trap … EXIT` (not a trailing
+# line) so even an early `exit` still refreshes the cache. Registered after the
+# flock so a flock-fail early-exit does NOT fire it — the instance already
+# running writes the status. Non-fatal (`|| true`). See SPEC-curate-liveness
+# §4/§5.3.
+trap 'node "$SILO_SRC/src/cli/silo.js" curate-status --silo-dir="$SILO_DIR" >> "$LOG" 2>&1 || true' EXIT
+
 # uuidgen may live in `uuid-runtime` (Debian/Ubuntu) — fall back to /proc if absent.
 if command -v uuidgen >/dev/null 2>&1; then
   RUN_ID="$(uuidgen)"

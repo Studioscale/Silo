@@ -38,6 +38,17 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
+# Curate-liveness: refresh the liveness cache on EVERY exit path (success,
+# failure, or an early `exit` later in the script) — hence a `trap … EXIT`, not
+# a trailing line that an early exit would skip. In-band here means a SUCCESSFUL
+# curate run reflects recovery immediately at 05:00; it does NOT replace detect's
+# out-of-band call, which is what catches curate *death* (a dead curate never
+# reaches this trap). Registered after the flock so a flock-fail early-exit does
+# NOT fire it — the instance already running will write the status. Non-fatal:
+# the `|| true` keeps a curate-status failure from replacing this script's exit
+# code. See SPEC-curate-liveness §4/§5.3.
+trap 'node "$SILO_SRC/src/cli/silo.js" curate-status --silo-dir="$SILO_DIR" >> "$LOG" 2>&1 || true' EXIT
+
 if command -v uuidgen >/dev/null 2>&1; then
   RUN_ID="$(uuidgen)"
 else
