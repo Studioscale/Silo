@@ -208,6 +208,38 @@ function extractAdmissionCode(stderr) {
   return m ? m[1] : null;
 }
 
+/**
+ * Build a structured MCP error result from a failed CLI spawn — shared by the
+ * CLI-shell write tools (accept_suggestion / dismiss_suggestion / retire_bullet).
+ * Pulls the ADMISSION_REFUSED token first, then the `silo <cmd>: <CODE> —` token;
+ * attaches any trailing pretty-printed detail JSON the CLI emitted.
+ *
+ * @param {{stderr?:string, stdout?:string}} r - spawnSync result (status !== 0)
+ * @param {RegExp} codeRe - captures the op-error CODE from stderr (group 1)
+ * @param {string} fallbackCode - code when neither token is present
+ * @param {string} failMsg - default human message
+ */
+function cliSpawnError(r, codeRe, fallbackCode, failMsg) {
+  const admissionCode = extractAdmissionCode(r.stderr);
+  const m = (r.stderr || '').match(codeRe);
+  const code = admissionCode || (m ? m[1] : fallbackCode);
+  // The detail JSON is pretty-printed on its own line(s). Anchor the opening
+  // brace to line-start (/m) so a `{` inside the error message can't trigger a
+  // spurious match (tightens the previous bare /(\{[\s\S]*\})/).
+  let detail = null;
+  const detailMatch = (r.stderr || '').match(/^(\{[\s\S]*\})/m);
+  if (detailMatch) { try { detail = JSON.parse(detailMatch[1]); } catch { /* ignore */ } }
+  const err = errorResult(code, r.stderr || r.stdout || failMsg);
+  if (detail) {
+    try {
+      const obj = JSON.parse(err.content[0].text);
+      obj.detail = detail;
+      err.content[0].text = JSON.stringify(obj, null, 2);
+    } catch { /* shouldn't happen */ }
+  }
+  return err;
+}
+
 function todayStr() {
   // Use BRT (UTC-3)
   const now = new Date();
@@ -228,7 +260,7 @@ async function siloNoticesForRead() {
   });
 }
 
-/** Spawn `silo regenerate` after a successful accept/dismiss. Returns bool. */
+/** Spawn `silo regenerate` after a successful accept/dismiss/retire. Returns bool. */
 function regenerateAfterWrite() {
   const r = spawnSync('node', [
     SILO_CLI, 'regenerate',
@@ -236,6 +268,10 @@ function regenerateAfterWrite() {
     `--to=${SILO_BASE}`,
   ], { encoding: 'utf-8' });
   if (r.status === 0) {
+    // Restore ownership for the OpenClaw container (uid 1000) — same as the
+    // write_event path. The regen rewrites files as root; this keeps the
+    // container's read access uniform across all four MCP write tools. Non-fatal.
+    spawnSync('chown', ['-R', '1000:1000', join(SILO_BASE, 'events')], { encoding: 'utf-8' });
     // Invalidate caches the regen affects.
     indexCache = { content: null, mtime: null, slugs: null, topics: null };
   }
@@ -847,13 +883,7 @@ server.tool(
     if (tags?.length) args.push(`--tags=${tags.join(',')}`);
     const r = spawnSync('node', args, { encoding: 'utf-8' });
     if (r.status !== 0) {
-      // SuggestionOpError code is printed on stderr; pluck it for caller.
-      // M3: scan for ADMISSION_REFUSED token first; fall back to the
-      // existing SuggestionOpError code regex.
-      const admissionCode = extractAdmissionCode(r.stderr);
-      const m = (r.stderr || '').match(/silo suggest --accept: ([A-Z_]+) —/);
-      const code = admissionCode || (m ? m[1] : 'ACCEPT_FAILED');
-      return errorResult(code, r.stderr || r.stdout || 'accept failed');
+      return cliSpawnError(r, /silo suggest --accept: ([A-Z0-9_]+) —/, 'ACCEPT_FAILED', 'accept failed');
     }
     const accepted = JSON.parse(r.stdout);
     const regenerated = regenerateAfterWrite();
@@ -897,26 +927,7 @@ server.tool(
     if (reason) args.push(`--reason=${reason}`);
     const r = spawnSync('node', args, { encoding: 'utf-8' });
     if (r.status !== 0) {
-      // M3: scan for ADMISSION_REFUSED token first; fall back to the
-      // existing SuggestionOpError code regex.
-      const admissionCode = extractAdmissionCode(r.stderr);
-      const m = (r.stderr || '').match(/silo suggest --dismiss: ([A-Z_]+) —/);
-      const code = admissionCode || (m ? m[1] : 'DISMISS_FAILED');
-      // Try to extract the structured `invalid` detail JSON if present.
-      let detail = null;
-      const detailMatch = (r.stderr || '').match(/(\{[\s\S]*\})/);
-      if (detailMatch) {
-        try { detail = JSON.parse(detailMatch[1]); } catch { /* ignore */ }
-      }
-      const err = errorResult(code, r.stderr || r.stdout || 'dismiss failed');
-      if (detail) {
-        try {
-          const obj = JSON.parse(err.content[0].text);
-          obj.detail = detail;
-          err.content[0].text = JSON.stringify(obj, null, 2);
-        } catch { /* shouldn't happen */ }
-      }
-      return err;
+      return cliSpawnError(r, /silo suggest --dismiss: ([A-Z0-9_]+) —/, 'DISMISS_FAILED', 'dismiss failed');
     }
     const dismissed = JSON.parse(r.stdout);
     regenerateAfterWrite();
@@ -952,26 +963,7 @@ server.tool(
     if (reason) args.push(`--reason=${reason}`);
     const r = spawnSync('node', args, { encoding: 'utf-8' });
     if (r.status !== 0) {
-      // M3: scan for ADMISSION_REFUSED token first; fall back to the
-      // RetireOpError code regex (load-bearing stderr token `silo retire: CODE —`).
-      const admissionCode = extractAdmissionCode(r.stderr);
-      const m = (r.stderr || '').match(/silo retire: ([A-Z_]+) —/);
-      const code = admissionCode || (m ? m[1] : 'RETIRE_FAILED');
-      // Surface the structured invalid/detail JSON if present (mirror dismiss).
-      let detail = null;
-      const detailMatch = (r.stderr || '').match(/(\{[\s\S]*\})/);
-      if (detailMatch) {
-        try { detail = JSON.parse(detailMatch[1]); } catch { /* ignore */ }
-      }
-      const err = errorResult(code, r.stderr || r.stdout || 'retire failed');
-      if (detail) {
-        try {
-          const obj = JSON.parse(err.content[0].text);
-          obj.detail = detail;
-          err.content[0].text = JSON.stringify(obj, null, 2);
-        } catch { /* shouldn't happen */ }
-      }
-      return err;
+      return cliSpawnError(r, /silo retire: ([A-Z0-9_]+) —/, 'RETIRE_FAILED', 'retire failed');
     }
     const out = JSON.parse(r.stdout);
     const regenerated = regenerateAfterWrite();
