@@ -54,6 +54,11 @@ import {
   SuggestionOpError,
 } from '../topic-proposal/suggestion-ops.js';
 import {
+  retireBullet,
+  filterActiveCuratedSeqs,
+  RetireOpError,
+} from '../topic-proposal/retire-ops.js';
+import {
   isOptOut as isUpdateOptOut,
   maybeFireUpdateCheck,
   performCheck,
@@ -797,22 +802,37 @@ Output retirements (if any) then new bullets, per the rules above.`;
 
     // Emit retirement event first (if any), so projections reflect the
     // cleaned slate alongside any new bullets emitted in this run.
+    //
+    // §B1 (proposals/retire-primitive.md §4.6): re-validate supersededSeqs
+    // against a LOCK-SCOPED fresh active-CURATED set before appending, so a
+    // manual `silo retire` that raced this run's pre-lock interpret() can't make
+    // curate emit a no-op TOPIC_BULLETS_RETIRED. On the common (no-race) path the
+    // payload is byte-identical. NOTE: the tail-safety gate (§4.5) is manual-op
+    // ONLY and is deliberately NOT mirrored here — the nightly batch is
+    // self-healing and its role is to keep running (§4.6).
     let retired = 0;
+    let actuallyRetiredSeqs = []; // R2-Retire-2: carried OUT of the lock for the summary
     if (supersededSeqs.length > 0) {
-      const retirePayload = {
-        topic: targetSlug,
-        superseded_seqs: supersededSeqs,
-        source: 'silo-curate',
-      };
-      if (retireReason) retirePayload.reason = retireReason;
-      await writer.append({
-        type: 'TOPIC_BULLETS_RETIRED',
-        isStateBearing: true,
-        intentId: `intent:${uuidv7()}`,
-        principal: principal || 'curator',
-        payload: retirePayload,
+      await writer.withAppendLock(async ({ writer: w, freshState }) => {
+        // Keep only seqs still active-CURATED now; drop already-retired / vanished.
+        const stillValid = filterActiveCuratedSeqs(freshState, targetSlug, supersededSeqs);
+        if (stillValid.length === 0) return; // nothing left to retire — append NOTHING
+        const retirePayload = {
+          topic: targetSlug,
+          superseded_seqs: stillValid,
+          source: 'silo-curate',
+        };
+        if (retireReason) retirePayload.reason = retireReason;
+        await w._appendBatchUnlocked([{
+          type: 'TOPIC_BULLETS_RETIRED',
+          isStateBearing: true,
+          intentId: `intent:${uuidv7()}`,
+          principal: principal || 'curator',
+          payload: retirePayload,
+        }]);
+        retired = stillValid.length;
+        actuallyRetiredSeqs = stillValid; // what was REALLY written, post-filter
       });
-      retired = supersededSeqs.length;
     }
 
     let written = 0;
@@ -865,7 +885,7 @@ Output retirements (if any) then new bullets, per the rules above.`;
       bullets_proposed: bullets.length,
       bullets_written: written,
       bullets_retired: retired,
-      retired_seqs: supersededSeqs,
+      retired_seqs: actuallyRetiredSeqs,
       retire_reason: retireReason,
       verified,
       tokens_used: response?.usage?.total_tokens ?? null,
@@ -1043,6 +1063,70 @@ async function cmdSuggest(values) {
     default:
       // unreachable due to active.length === 1 check
       throw new Error('unreachable');
+  }
+}
+
+// ── silo retire — proposals/retire-primitive.md (v0.2.2) ─────────────────────
+
+const SEQ_TOKEN_RE = /^[1-9]\d*$/; // positive integer; no leading zero/sign/decimal/suffix
+
+async function cmdRetire(values) {
+  // Required-flag guards (changelog #5 NIT) — a missing flag must produce a
+  // clear usage error, NOT fall through the token parser (which would render
+  // `undefined` and emit a confusing "--seq value \"undefined\" is not a
+  // positive integer"). `values.seq` is undefined when absent (multiple:true).
+  if (!values.slug) {
+    console.error('silo retire: --slug is required');
+    process.exit(2);
+  }
+  if (!values.seq) {
+    console.error('silo retire: --seq is required (one or more positive integers, e.g. --seq 5 or --seq 5,9)');
+    process.exit(2);
+  }
+
+  // Strict --seq parse (R2-Retire-1): tokenize repeats + comma-lists, require
+  // ^[1-9]\d*$ BEFORE numeric conversion. Do NOT use Number.parseInt (it
+  // silently coerces "12abc"->12, "1.5"->1). Retire is projection-destructive:
+  // a fat-finger must be a usage error, not a wrong retire.
+  const rawTokens = (Array.isArray(values.seq) ? values.seq : [values.seq])
+    .flatMap((s) => String(s).split(','))
+    .map((t) => t.trim());
+  const seqs = [];
+  for (const tok of rawTokens) {
+    if (!SEQ_TOKEN_RE.test(tok)) {
+      console.error(`silo retire: --seq value "${tok}" is not a positive integer`);
+      process.exit(2);
+    }
+    const n = Number(tok);
+    if (!Number.isSafeInteger(n)) {
+      console.error(`silo retire: --seq value "${tok}" exceeds the safe-integer range`);
+      process.exit(2);
+    }
+    seqs.push(n);
+  }
+
+  const writer = await openWriter(values['silo-dir']);
+  try {
+    const result = await retireBullet(writer, {
+      slug: values.slug,
+      seqs,
+      reason: values.reason,
+      principal: values.principal,
+    });
+    console.log(JSON.stringify(result, null, 2));
+    if (values.to) {
+      const freshState = await interpret(writer);
+      await regenerateProjections({ logReader: writer, state: freshState, targetDir: values.to });
+    }
+  } catch (err) {
+    if (err instanceof RetireOpError) {
+      // The stderr token `silo retire: <CODE> — <message>` is load-bearing:
+      // the MCP layer regex-extracts <CODE> from it (mirrors suggest).
+      console.error(`silo retire: ${err.code} — ${err.message}`);
+      if (err.detail) console.error(JSON.stringify(err.detail, null, 2));
+      process.exit(1);
+    }
+    throw err;
   }
 }
 
@@ -1361,6 +1445,8 @@ async function main() {
     'bulk-scan': { type: 'boolean', default: false },
     'cooldown-days': { type: 'string' },
     reason: { type: 'string' },
+    // `silo retire` — repeatable + comma-list seq(s). multiple:true → array.
+    seq: { type: 'string', multiple: true },
     json: { type: 'boolean', default: false },
     name: { type: 'string' },
     description: { type: 'string' },
@@ -1416,6 +1502,9 @@ async function main() {
       case 'curate':
         await cmdCurate(values);
         break;
+      case 'retire':
+        await cmdRetire(values);
+        break;
       case 'regenerate':
         await cmdRegenerate(values);
         break;
@@ -1463,6 +1552,11 @@ commands:
   search      retrieve matching topics (exact | context | orient)
   extract     distill memory entries from a session transcript
   curate      promote events to Layer 2 (auto-bootstraps accepted suggestions)
+  retire      retire active Layer-2 (CURATED) bullet(s) by seq, one topic.
+              --slug=<s> --seq=<n>[,<n>...] [--reason=<txt>] [--to=<path>]
+              WARNING: retires the ENTIRE write_event at each seq. For
+              import-origin writes that is a whole "## Heading" section,
+              not a single line. No un-retire — restore by re-curating.
   suggest     topic-proposal admin: --run-now | --list | --accept <seq>
               --dismiss <seq> | --status | --bulk-scan
   doctor      diagnostic readout; --check-updates forces a fresh GitHub check
@@ -1473,7 +1567,7 @@ commands:
 
 global options:
   --silo-dir=<path>    silo data directory (default: .silo)
-  --principal=<name>   requesting principal (default: helder)
+  --principal=<name>   requesting principal (default: operator)
 
 examples:
   silo init --silo-dir=./data --operator=helder --uid=1000

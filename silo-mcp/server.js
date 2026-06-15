@@ -34,6 +34,10 @@ const WRITE_SIDE_EFFECT = {
   idempotentHint: false,
   openWorldHint: false,
 };
+// retire_bullet: the append-only log makes a bullet recoverable by re-curation,
+// but ONE seq can remove a whole import-origin "## Heading" section — so a
+// generic client should treat it as destructive and confirm first.
+const WRITE_DESTRUCTIVE = { ...WRITE_SIDE_EFFECT, destructiveHint: true };
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -44,6 +48,12 @@ const SILO_BASE = process.env.SILO_BASE || '/root/clawd-v3';
 const SILO_DIR = process.env.SILO_DIR || '/root/.silo';
 const SILO_SRC_DIR = process.env.SILO_SRC_DIR || '/root/silo';
 const SILO_CLI = `${SILO_SRC_DIR}/src/cli/silo.js`;
+// Server-deployment principal for ALL MCP write tools (write_event / accept /
+// dismiss / retire). NOT caller identity — the transport has only a shared
+// bearer token, so this records WHICH deployment wrote the event, overridable
+// per-instance (e.g. a Jarvis-only or ChatGPT-only front-end). Default
+// preserves prior behavior so a single caller never logs under two principals.
+const MCP_PRINCIPAL = process.env.SILO_MCP_PRINCIPAL || 'desktop-claude';
 const TOPIC_INDEX_PATH = join(SILO_BASE, 'TOPIC-INDEX.md');
 const TOPICS_DIR = join(SILO_BASE, 'topics');
 const EVENTS_DIR = join(SILO_BASE, 'events');
@@ -702,7 +712,7 @@ server.tool(
         '--slug=' + slug,
         '--tag=' + tag,
         '--content=' + bodyWithPrefix,
-        '--principal=desktop-claude',
+        `--principal=${MCP_PRINCIPAL}`,
         ...(confidence ? ['--confidence=' + confidence] : []),
       ], { encoding: 'utf-8' });
       if (writeCmd.status !== 0) {
@@ -829,7 +839,7 @@ server.tool(
       SILO_CLI, 'suggest',
       '--accept', String(suggestion_seq),
       `--silo-dir=${SILO_DIR}`,
-      '--principal=desktop-claude',
+      `--principal=${MCP_PRINCIPAL}`,
     ];
     if (slug) args.push(`--slug=${slug}`);
     if (description) args.push(`--description=${description}`);
@@ -881,7 +891,7 @@ server.tool(
       SILO_CLI, 'suggest',
       '--dismiss', suggestion_seqs.join(','),
       `--silo-dir=${SILO_DIR}`,
-      '--principal=desktop-claude',
+      `--principal=${MCP_PRINCIPAL}`,
     ];
     if (cooldown_days != null) args.push(`--cooldown-days=${cooldown_days}`);
     if (reason) args.push(`--reason=${reason}`);
@@ -911,6 +921,61 @@ server.tool(
     const dismissed = JSON.parse(r.stdout);
     regenerateAfterWrite();
     return successResult(dismissed);
+  }
+);
+
+// ── Tool 11: retire_bullet (proposals/retire-primitive.md §4.3, v0.2.2) ─────
+
+server.tool(
+  'retire_bullet',
+  'Retire one or more active curated (Layer-2) bullets by seq, on a single topic. WRITE — only use after the user clearly intends to remove those specific facts. Retires the ENTIRE write_event payload at each seq: for import-origin writes that is a whole "## Heading" section, not a single line. Emits one TOPIC_BULLETS_RETIRED event under the operation-log lock after re-validating that every seq is a currently-active CURATED bullet on the named topic, then regenerates projections. All-or-nothing: any invalid seq aborts the whole call. There is no un-retire; to restore, re-curate the bullet (write a new CURATED bullet).',
+  {
+    slug: z.string().describe('Topic slug owning the bullet(s)'),
+    seqs: z.array(z.number().int().positive()).min(1).max(256)
+      .describe('Seq(s) of active CURATED write_events to retire (one topic, all-or-nothing). Retires the WHOLE payload at each seq.'),
+    reason: z.string()
+      .min(1)
+      .max(120)
+      .refine((s) => !/[\r\n]/.test(s), { message: 'reason must be a single line' })
+      .optional()
+      .describe('Why it is being retired (non-blank, single line, <=120 chars)'),
+  },
+  WRITE_DESTRUCTIVE,
+  async ({ slug, seqs, reason }) => {
+    const args = [
+      SILO_CLI, 'retire',
+      `--slug=${slug}`,
+      ...seqs.map((s) => `--seq=${String(s)}`), // repeatable; CLI also accepts comma form
+      `--silo-dir=${SILO_DIR}`,
+      `--principal=${MCP_PRINCIPAL}`,
+    ];
+    if (reason) args.push(`--reason=${reason}`);
+    const r = spawnSync('node', args, { encoding: 'utf-8' });
+    if (r.status !== 0) {
+      // M3: scan for ADMISSION_REFUSED token first; fall back to the
+      // RetireOpError code regex (load-bearing stderr token `silo retire: CODE —`).
+      const admissionCode = extractAdmissionCode(r.stderr);
+      const m = (r.stderr || '').match(/silo retire: ([A-Z_]+) —/);
+      const code = admissionCode || (m ? m[1] : 'RETIRE_FAILED');
+      // Surface the structured invalid/detail JSON if present (mirror dismiss).
+      let detail = null;
+      const detailMatch = (r.stderr || '').match(/(\{[\s\S]*\})/);
+      if (detailMatch) {
+        try { detail = JSON.parse(detailMatch[1]); } catch { /* ignore */ }
+      }
+      const err = errorResult(code, r.stderr || r.stdout || 'retire failed');
+      if (detail) {
+        try {
+          const obj = JSON.parse(err.content[0].text);
+          obj.detail = detail;
+          err.content[0].text = JSON.stringify(obj, null, 2);
+        } catch { /* shouldn't happen */ }
+      }
+      return err;
+    }
+    const out = JSON.parse(r.stdout);
+    const regenerated = regenerateAfterWrite();
+    return successResult({ ...out, regenerated });
   }
 );
 

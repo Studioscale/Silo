@@ -4,11 +4,24 @@ All notable changes to Silo. Format loosely based on [Keep a Changelog](https://
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-06-14
+
+`silo retire` — a first-class, audited primitive to retire curated Layer-2 bullets on demand. Additive (new CLI verb + MCP tool + ops module) plus one hardening edit to the curate command's retire emission. No schema or log-format change; rides the existing `TOPIC_BULLETS_RETIRED` event type. Ratified design (multi-reviewer gauntlet + independent source re-verification): [`proposals/retire-primitive.md`](proposals/retire-primitive.md).
+
 ### Added
+- **`silo retire --slug=<s> --seq=<n>[,<n>...] [--reason=<txt>] [--to=<path>]`** — retire one or more currently-active CURATED bullets on a single topic, all-or-nothing. Re-validates every seq under the operation-log lock before appending, so a bad request never pollutes the append-only log with a no-op event. Strict `--seq` parsing (`^[1-9]\d*$` + safe-integer) rejects `1.5` / `12abc` / unsafe ints as usage errors. **Granularity:** retires the entire `write_event` at each seq — for import-origin writes that is a whole `## Heading` section, not a single line. No un-retire; restore by re-curating.
+- **`retire_bullet` MCP tool** — mirrors the CLI 1:1; `destructiveHint: true` so generic clients confirm. `reason` is admission-matched (non-blank, single-line, ≤120 chars).
+- **Tail-safety integrity gate.** Retire refuses (`LOG_INTEGRITY_UNSAFE`) when the operation log's physical tail is itself broken or malformed (`freshState.last_seq !== freshTail.seq`) — because `LogWriter._scanTailUnlocked` is hash-chain-blind, a new append would otherwise chain onto a broken tail and be silently orphaned. Does NOT trip on the production log's historical mid-log breaks (the tail stays folded). Manual-op only; the nightly curate emitter stays ungated (self-healing). Independently re-derived from source and confirmed by a fresh clean-room review before ratification.
+- **`SILO_MCP_PRINCIPAL`** — one server-deployment principal routed through all four MCP write tools (`write_event` / `accept_suggestion` / `dismiss_suggestion` / `retire_bullet`), so a single caller never logs under two principals. Defaults to `desktop-claude` (prior behavior). Records *which deployment* wrote, not caller identity (shared bearer token).
+- 24 new `test/retire-ops.test.js` cases (518 total), including both tail-gate branches (historical-middle-break allowed; broken / shape-malformed tail refused), TOCTOU, and every referential pre-flight error.
 - **`scripts/silo-backup.sh`** — reference nightly snapshot of the silo data dir (`tar.gz` + integrity test + count-based rotation, default keep-14). Count-based rotation chosen over age-based so a silently-stalled backup cron freezes the archive set instead of draining it to zero. Hot-copy safe: the operation log's replay-safe prefix recovery means a snapshot taken mid-write is still a valid restorable log. Emits `[FACT] system:` status events (`source=silo-backup`) bookending each run, same pattern as curate/detect.
 
+### Changed
+- **`cmdCurate` retire emission is now lock-scoped (§B1).** Re-validates `superseded_seqs` against a fresh active-CURATED set under `withAppendLock` and reports the actually-retired set in its summary — so a concurrent manual `silo retire` can no longer make the nightly curate emit a no-op retire. Byte-identical payload on the common (no-race) path. The tail-safety gate is deliberately NOT mirrored here (the batch is self-healing).
+
 ### Fixed
-- README §Status: stale test count (129 → 494) and stale date; now also names the npm version (0.2.1) alongside the v12.5 spec lineage.
+- `printHelp` `--principal` default doc string corrected (`helder` → `operator`) to match the actual `GLOBAL_OPTIONS` default.
+- README §Status: stale test count (129 → 494) and stale date; now also names the npm version alongside the v12.5 spec lineage.
 - `src/admission/payload-validators.js` header comments no longer claim `write_event` is unvalidated (it has been since 0.2.0) and no longer track the M3 matrix-gate wiring as a pending follow-up (it shipped — the gate runs in `LogWriter._appendBatchUnlocked` before payload validation).
 
 ## [0.2.1] — 2026-05-24
