@@ -38,6 +38,19 @@ export class SuggestionOpError extends Error {
 }
 
 /**
+ * Shared topic-creation collision guard (reused by acceptSuggestion AND
+ * `silo topic create` so the semantics stay identical, not duplicated). A slug
+ * that already carries a `topic_type` is an existing topic; minting it again is
+ * a SLUG_COLLISION. Must be called against a LOCK-SCOPED freshState.
+ */
+export function assertSlugHasNoTopic(freshState, slug) {
+  const existingMeta = freshState.topic_index.get(slug);
+  if (existingMeta?.topic_type) {
+    throw new SuggestionOpError('SLUG_COLLISION', `slug "${slug}" already has a topic file`);
+  }
+}
+
+/**
  * Accept a pending TOPIC_SUGGESTED — emits a batched
  * (TOPIC_METADATA_SET, TOPIC_SUGGESTION_ACCEPTED) pair atomically.
  *
@@ -63,7 +76,7 @@ export async function acceptSuggestion(writer, input) {
   const principal = input.principal ?? DEFAULT_PRINCIPAL;
 
   let result;
-  await writer.withAppendLock(async ({ writer: w, freshState }) => {
+  await writer.withAppendLock(async ({ writer: w, freshState, admissionContext }) => {
     // 1. Validate suggestion under lock — catches retries + concurrent state.
     const suggestion = freshState.topic_suggestions.get(input.suggestion_seq);
     if (!suggestion) {
@@ -78,10 +91,7 @@ export async function acceptSuggestion(writer, input) {
     if (!isValidSlug(finalSlug)) {
       throw new SuggestionOpError('INVALID_SLUG', `slug "${finalSlug}" fails regex/length validation`);
     }
-    const existingMeta = freshState.topic_index.get(finalSlug);
-    if (existingMeta?.topic_type) {
-      throw new SuggestionOpError('SLUG_COLLISION', `slug "${finalSlug}" already has a topic file`);
-    }
+    assertSlugHasNoTopic(freshState, finalSlug);
 
     // 3. Accept-time semantic re-validation of supporting_seqs (§8 step 2).
     for (const seq of suggestion.supporting_seqs) {
@@ -139,7 +149,7 @@ export async function acceptSuggestion(writer, input) {
         principal,
         payload: acceptedPayload,
       },
-    ]);
+    ], admissionContext);
     result = {
       accepted: true,
       suggestion_seq: input.suggestion_seq,
@@ -176,7 +186,7 @@ export async function dismissSuggestions(writer, input) {
   const seqs = [...new Set(input.suggestion_seqs)].sort((a, b) => a - b);
 
   let result;
-  await writer.withAppendLock(async ({ writer: w, freshState }) => {
+  await writer.withAppendLock(async ({ writer: w, freshState, admissionContext }) => {
     // All-or-nothing pre-check: collect invalid seqs.
     const invalid = [];
     for (const seq of seqs) {
@@ -209,7 +219,7 @@ export async function dismissSuggestions(writer, input) {
         principal,
         payload,
       },
-    ]);
+    ], admissionContext);
     result = {
       dismissed: true,
       dismissed_seq: appended.seq,

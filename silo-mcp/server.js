@@ -686,10 +686,10 @@ server.tool(
 
 server.tool(
   'write_event',
-  'Append a memory event through Silo\'s operation log. WRITE — requires explicit user intent. Confirm with the user before recording decisions, user facts, or project updates. Server validates format, checks for duplicates, and enforces slug validity. NEVER edit projection files directly; always go through this tool.',
+  'Append a memory event through Silo\'s operation log. WRITE — requires explicit user intent. Confirm with the user before recording decisions, user facts, or project updates. The topic must ALREADY EXIST — write_event never auto-creates a topic; a novel slug is rejected (SLUG_NOT_ADMITTED). Create a new topic first with `silo topic create <slug>`, or use the catch-all "general". Server validates format and checks for duplicates. NEVER edit projection files directly; always go through this tool.',
   {
     tag: z.enum(VALID_TAGS).describe('Event tag'),
-    slug: z.string().describe('Topic slug — must exist in TOPIC-INDEX.md or be "general"'),
+    slug: z.string().describe('Topic slug — must be an existing topic, or "general"/"system". A slug that was never created is rejected (SLUG_NOT_ADMITTED); create it first with `silo topic create`.'),
     content: z.string().min(1).max(500).describe('Event content (single line, max 500 chars)'),
     confidence: z.enum(VALID_CONFIDENCES).optional().describe('Confidence level (omit for standard entries)'),
   },
@@ -698,17 +698,12 @@ server.tool(
     const warnings = [];
 
     // Validation 1: tag — handled by zod enum
-    // Validation 2: slug
-    try {
-      const idx = await loadTopicIndex();
-      if (slug !== 'general' && !idx.slugs.has(slug)) {
-        return errorResult('SLUG_NOT_FOUND',
-          `Slug "${slug}" not found in TOPIC-INDEX.md`,
-          `Valid slugs: general, ${[...idx.slugs].join(', ')}`);
-      }
-    } catch (err) {
-      return errorResult(err.code || 'FS_ERROR', err.message);
-    }
+    // Validation 2: slug existence — NO pre-gate here (spec F9 / build-note #8).
+    // The slug-existence guard in the core LogWriter (src/admission/
+    // slug-existence.js, v0.2.5) is the single authority; the write below routes
+    // through the silo CLI, which inherits it. A projected-index pre-gate would
+    // be redundant and projection-lag-prone. A novel slug now surfaces as a
+    // structured SLUG_NOT_ADMITTED from the CLI (handled at the write call).
 
     // Validation 3 & 4: content length — handled by zod
 
@@ -770,8 +765,24 @@ server.tool(
       if (writeCmd.status !== 0) {
         const admissionCode = extractAdmissionCode(writeCmd.stderr);
         if (admissionCode) {
-          return errorResult(admissionCode,
-            'admission gate refused write: ' + (writeCmd.stderr || 'unknown'));
+          // Attach the structured {slug, hint} detail the CLI emits after the
+          // `ADMISSION_REFUSED:<code> —` token so the caller gets a loud,
+          // structured, ACTIONABLE failure rather than free text (build-note #9).
+          // For SLUG_NOT_ADMITTED the hint says how to recover (create the topic
+          // / use general).
+          let detail = null;
+          const dm = (writeCmd.stderr || '').match(/ADMISSION_REFUSED:[A-Z_]+ — (\{[\s\S]*?\})\s*$/m);
+          if (dm) { try { detail = JSON.parse(dm[1]); } catch { /* ignore */ } }
+          const message = detail?.hint
+            ? `Write refused (${admissionCode}): ${detail.hint}`
+            : 'admission gate refused write: ' + (writeCmd.stderr || 'unknown');
+          const res = errorResult(admissionCode, message);
+          if (detail) {
+            const obj = JSON.parse(res.content[0].text);
+            obj.detail = detail;
+            res.content[0].text = JSON.stringify(obj, null, 2);
+          }
+          return res;
         }
         return errorResult('SILO_WRITE_FAILED',
           'silo CLI rejected write: ' + (writeCmd.stderr || writeCmd.stdout || 'unknown'));

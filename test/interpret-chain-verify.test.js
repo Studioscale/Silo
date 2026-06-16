@@ -58,7 +58,7 @@ test('interpret: clean log → no hash_chain_break entries in state.skipped', as
       isStateBearing: true,
       intentId: `intent:${i}`,
       principal: 'helder',
-      payload: { slug: 'demo', tag: 'FACT', content: `event ${i}` },
+      payload: { slug: 'general', tag: 'FACT', content: `event ${i}` },
       ts: `2026-05-19T10:00:${String(i).padStart(2, '0')}Z`,
     });
   }
@@ -78,7 +78,7 @@ test('interpret: tampered hash_prev → hash_chain_break + entry NOT folded', as
     isStateBearing: true,
     intentId: 'intent:1',
     principal: 'helder',
-    payload: { slug: 'demo', tag: 'FACT', content: 'first' },
+    payload: { slug: 'general', tag: 'FACT', content: 'first' },
     ts: '2026-05-19T10:00:00Z',
   });
   const tail = writer.tail();
@@ -93,7 +93,7 @@ test('interpret: tampered hash_prev → hash_chain_break + entry NOT folded', as
     hashPrev: forgedHashPrev,
     intentId: 'intent:forged',
     principal: 'attacker',
-    payload: { slug: 'demo', tag: 'FACT', content: 'injected' },
+    payload: { slug: 'general', tag: 'FACT', content: 'injected' },
     ts: '2026-05-19T10:00:01Z',
   });
   await writeRawEntry(writer, forged);
@@ -105,7 +105,7 @@ test('interpret: tampered hash_prev → hash_chain_break + entry NOT folded', as
   assert.equal(breaks[0].got_hash_prev, forgedHashPrev);
   assert.equal(breaks[0].expected_hash_prev, tail.hash);
   // The forged content must NOT appear in topic_content for 'demo'.
-  const demo = state.topic_content.get('demo') ?? [];
+  const demo = state.topic_content.get('general') ?? [];
   assert.equal(demo.length, 1);
   assert.equal(demo[0].content, 'first');
 });
@@ -123,7 +123,7 @@ test('interpret: first entry not chaining to genesis → hash_chain_break', asyn
     hashPrev: 'f'.repeat(64),
     intentId: 'intent:wrong-genesis',
     principal: 'helder',
-    payload: { slug: 'demo', tag: 'FACT', content: 'bad genesis' },
+    payload: { slug: 'general', tag: 'FACT', content: 'bad genesis' },
     ts: '2026-05-19T10:00:00Z',
   });
   await writeRawEntry(writer, forged);
@@ -145,7 +145,7 @@ test('interpret: valid entry after a chain break (chains to last good) is folded
     isStateBearing: true,
     intentId: 'intent:good1',
     principal: 'helder',
-    payload: { slug: 'demo', tag: 'FACT', content: 'good 1' },
+    payload: { slug: 'general', tag: 'FACT', content: 'good 1' },
     ts: '2026-05-19T10:00:00Z',
   });
   const goodTail = writer.tail();
@@ -158,7 +158,7 @@ test('interpret: valid entry after a chain break (chains to last good) is folded
     hashPrev: 'd'.repeat(64),
     intentId: 'intent:broken',
     principal: 'attacker',
-    payload: { slug: 'demo', tag: 'FACT', content: 'injected' },
+    payload: { slug: 'general', tag: 'FACT', content: 'injected' },
     ts: '2026-05-19T10:00:01Z',
   });
   await writeRawEntry(writer, broken);
@@ -172,7 +172,7 @@ test('interpret: valid entry after a chain break (chains to last good) is folded
     hashPrev: goodTail.hash, // chains to good1, not to the forged
     intentId: 'intent:good2',
     principal: 'helder',
-    payload: { slug: 'demo', tag: 'FACT', content: 'good 2' },
+    payload: { slug: 'general', tag: 'FACT', content: 'good 2' },
     ts: '2026-05-19T10:00:02Z',
   });
   await writeRawEntry(writer, good2);
@@ -182,7 +182,7 @@ test('interpret: valid entry after a chain break (chains to last good) is folded
   // The broken entry is rejected; good2 is accepted (chains to good1).
   assert.equal(breaks.length, 1);
   assert.equal(breaks[0].seq, goodTail.seq + 1);
-  const demo = state.topic_content.get('demo') ?? [];
+  const demo = state.topic_content.get('general') ?? [];
   assert.deepEqual(demo.map((h) => h.content), ['good 1', 'good 2']);
 });
 
@@ -195,7 +195,7 @@ test('interpret: tail_hash reflects last ACCEPTED entry, ignoring chain breaks',
     isStateBearing: true,
     intentId: 'intent:1',
     principal: 'helder',
-    payload: { slug: 'demo', tag: 'FACT', content: 'real' },
+    payload: { slug: 'general', tag: 'FACT', content: 'real' },
     ts: '2026-05-19T10:00:00Z',
   });
   // Forge a broken entry after.
@@ -206,7 +206,7 @@ test('interpret: tail_hash reflects last ACCEPTED entry, ignoring chain breaks',
     hashPrev: 'c'.repeat(64),
     intentId: 'intent:broken',
     principal: 'attacker',
-    payload: { slug: 'demo', tag: 'FACT', content: 'injected' },
+    payload: { slug: 'general', tag: 'FACT', content: 'injected' },
     ts: '2026-05-19T10:00:01Z',
   });
   await writeRawEntry(writer, broken);

@@ -201,7 +201,12 @@ export async function importTopicFile({ path, text, writer, principal, filename 
     principal,
     payload: {
       topic: slug,
-      type: frontmatter.type,
+      // Force a type when the source frontmatter omits one (R4-MAJOR-2): a
+      // type-less TOPIC_METADATA_SET would leave the slug non-write-admissible,
+      // so the very next same-topic write_event (the summary, below) would be
+      // rejected by the slug-existence guard. Mirrors acceptSuggestion's
+      // `?? 'reference'` default.
+      type: frontmatter.type ?? 'reference',
       tags,
       entities,
       status: frontmatter.status || 'active',

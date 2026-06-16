@@ -41,7 +41,7 @@ ANTI-BUNDLING: when multiple distinct decisions exist (e.g. a security audit cov
 For each item, assign:
 1. A TAG: one of FACT, DECISION, CHANGED, PROCEDURE, TODO, EVENT
 2. A CONFIDENCE: CONFIRMED (clear decisions / verified facts), TENTATIVE (considerations, open questions, "thinking about", "talvez"), or CONTEXT (background info worth remembering)
-3. A TOPIC SLUG from the TOPIC-INDEX below (exact match). If unsure, use: general
+3. A TOPIC SLUG that is an EXACT match from the TOPIC-INDEX below. Memory cannot create new topics — if the slug is not in the index (or you are unsure), use: general. Never invent a slug that is not listed.
 
 Output format — ONE ENTRY PER LINE, exactly this shape (replace the uppercase placeholders with real values; never write the literal word TAG or CONFIDENCE):
 

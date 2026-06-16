@@ -39,6 +39,7 @@ import { importDirectory } from '../import-jarvis/index.js';
 import { regenerateProjections } from '../projection/index.js';
 import { readSessionDelta } from '../distill/transcript.js';
 import { distill } from '../distill/distill.js';
+import { persistDistilledEntries } from '../distill/persist.js';
 import { tokenize, jaccardSimilarity } from '../distill/tokenize.js';
 import { pickLlmClient } from '../distill/llm-factory.js';
 import {
@@ -58,6 +59,7 @@ import {
   filterActiveCuratedSeqs,
   RetireOpError,
 } from '../topic-proposal/retire-ops.js';
+import { createTopic } from '../topic-proposal/topic-ops.js';
 import {
   isOptOut as isUpdateOptOut,
   maybeFireUpdateCheck,
@@ -436,24 +438,11 @@ async function cmdExtract({
     return;
   }
 
-  let written = 0;
-  for (const entry of result.entries) {
-    await writer.append({
-      type: 'write_event',
-      isStateBearing: true,
-      intentId: `intent:${uuidv7()}`,
-      principal,
-      payload: {
-        slug: entry.slug,
-        tag: entry.tag,
-        content: entry.content,
-        confidence: entry.confidence,
-        auto_extracted: true,
-        source: 'session-extract',
-      },
-    });
-    written += 1;
-  }
+  // Persist with the reactive slug-existence reroute (v0.2.5 §4.8): an entry
+  // whose distilled slug doesn't exist is re-routed to `general` and surfaced
+  // (never silently dropped); any other error propagates (fail-loud). Each
+  // entry is its own lock — see src/distill/persist.js.
+  const { written, rerouted } = await persistDistilledEntries(writer, result.entries, principal);
 
   // Persist state so the next run only sees new lines.
   if (stateFilePath) {
@@ -473,6 +462,11 @@ async function cmdExtract({
         candidates: result.candidates,
         deduped: result.deduped,
         written,
+        // Entries whose distilled slug didn't exist and were re-routed to
+        // `general` (slug-existence guard, v0.2.5). Surfaced so the reroute is
+        // visible — never a silent coercion.
+        rerouted_to_general: rerouted.length,
+        rerouted: rerouted.length ? rerouted : undefined,
         lines_processed: totalLines - lastProcessedLine,
         last_processed_line: totalLines,
         usage: result.usage,
@@ -819,7 +813,7 @@ Output retirements (if any) then new bullets, per the rules above.`;
     let retired = 0;
     let actuallyRetiredSeqs = []; // R2-Retire-2: carried OUT of the lock for the summary
     if (supersededSeqs.length > 0) {
-      await writer.withAppendLock(async ({ writer: w, freshState }) => {
+      await writer.withAppendLock(async ({ writer: w, freshState, admissionContext }) => {
         // Keep only seqs still active-CURATED now; drop already-retired / vanished.
         const stillValid = filterActiveCuratedSeqs(freshState, targetSlug, supersededSeqs);
         if (stillValid.length === 0) return; // nothing left to retire — append NOTHING
@@ -835,7 +829,7 @@ Output retirements (if any) then new bullets, per the rules above.`;
           intentId: `intent:${uuidv7()}`,
           principal: principal || 'curator',
           payload: retirePayload,
-        }]);
+        }], admissionContext);
         retired = stillValid.length;
         actuallyRetiredSeqs = stillValid; // what was REALLY written, post-filter
       });
@@ -1129,6 +1123,57 @@ async function cmdRetire(values) {
       // The stderr token `silo retire: <CODE> — <message>` is load-bearing:
       // the MCP layer regex-extracts <CODE> from it (mirrors suggest).
       console.error(`silo retire: ${err.code} — ${err.message}`);
+      if (err.detail) console.error(JSON.stringify(err.detail, null, 2));
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+// ── silo topic — slug-existence-guard v0.2.5 §4.6 ────────────────────────────
+
+async function cmdTopic(values, positionals) {
+  const sub = positionals[0];
+  if (sub !== 'create') {
+    console.error(`silo topic: unknown subcommand "${sub ?? ''}" (expected: create)`);
+    console.error('usage: silo topic create <slug> [--type=<t>] [--summary=<s>] [--tags=a,b] [--dismiss-pending] [--override-cooldown]');
+    process.exit(2);
+  }
+  await cmdTopicCreate(values, positionals);
+}
+
+async function cmdTopicCreate(values, positionals) {
+  // Slug from the positional (`silo topic create my-topic`) or --slug.
+  const slug = positionals[1] ?? values.slug;
+  if (!slug) {
+    console.error('silo topic create: <slug> required (e.g. silo topic create my-topic)');
+    process.exit(2);
+  }
+  const tags = values.tags
+    ? values.tags.split(',').map((t) => t.trim()).filter(Boolean)
+    : undefined;
+
+  const writer = await openWriter(values['silo-dir']);
+  try {
+    const result = await createTopic(writer, {
+      slug,
+      type: values.type, // createTopic defaults to 'reference'
+      summary: values.summary,
+      tags,
+      principal: values.principal,
+      dismissPending: !!values['dismiss-pending'],
+      overrideCooldown: !!values['override-cooldown'],
+    });
+    console.log(JSON.stringify(result, null, 2));
+    if (values.to) {
+      const freshState = await interpret(writer);
+      await regenerateProjections({ logReader: writer, state: freshState, targetDir: values.to });
+    }
+  } catch (err) {
+    if (err instanceof SuggestionOpError) {
+      // Load-bearing stderr token `silo topic create: <CODE> — <message>` so the
+      // MCP layer can regex-extract <CODE> (mirrors suggest / retire).
+      console.error(`silo topic create: ${err.code} — ${err.message}`);
       if (err.detail) console.error(JSON.stringify(err.detail, null, 2));
       process.exit(1);
     }
@@ -1449,8 +1494,12 @@ async function main() {
     // Audit follow-up: `silo regenerate --strict` refuses to project from a
     // log with hash-chain breaks or malformed entries.
     strict: { type: 'boolean', default: false },
+    // ── `silo topic create` flags (v0.2.5) ────────────────────────────────
+    summary: { type: 'string' },
+    'dismiss-pending': { type: 'boolean', default: false },
+    'override-cooldown': { type: 'boolean', default: false },
   };
-  const { values } = parseArgs({ args: argv, options, strict: false, allowPositionals: true });
+  const { values, positionals } = parseArgs({ args: argv, options, strict: false, allowPositionals: true });
 
   if (positionalQuery && !values.query) values.query = positionalQuery;
 
@@ -1500,6 +1549,9 @@ async function main() {
         break;
       case 'retire':
         await cmdRetire(values);
+        break;
+      case 'topic':
+        await cmdTopic(values, positionals);
         break;
       case 'regenerate':
         await cmdRegenerate(values);
@@ -1556,6 +1608,10 @@ commands:
               WARNING: retires the ENTIRE write_event at each seq. For
               import-origin writes that is a whole "## Heading" section,
               not a single line. No un-retire — restore by re-curating.
+  topic       topic admin: 'topic create <slug>' mints a new topic so
+              write_events to it are admissible (slug-existence guard).
+              [--type=<t> (default reference)] [--summary=<s>] [--tags=a,b]
+              [--dismiss-pending] [--override-cooldown] [--to=<path>]
   suggest     topic-proposal admin: --run-now | --list | --accept <seq>
               --dismiss <seq> | --status | --bulk-scan
   doctor      diagnostic readout; --check-updates forces a fresh GitHub check

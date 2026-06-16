@@ -350,6 +350,15 @@ test('distill integration: entries land in state via LogWriter + interpret', asy
     llm,
   });
 
+  // Create the distilled topics first (slug-existence guard, v0.2.5) so the
+  // write_events are admissible. In production `silo extract` reactively
+  // re-routes unknown slugs to `general`; here we assert the entries land on
+  // their named slugs, so we create those slugs.
+  const { seedTopic } = await import('./helpers/seed-topic.js');
+  for (const slug of new Set(result.entries.map((e) => e.slug))) {
+    await seedTopic(writer, slug);
+  }
+
   // Append entries through the real LogWriter so admission/hashing runs
   for (const entry of result.entries) {
     await writer.append({

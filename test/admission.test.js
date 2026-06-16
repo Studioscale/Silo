@@ -396,7 +396,7 @@ test('admission: LogWriter.append accepts valid TOPIC_BULLETS_RETIRED', async ()
     isStateBearing: true,
     intentId: 'intent:w1',
     principal: 'curator',
-    payload: { slug: 'project-alpha', tag: 'CURATED', content: '- bullet' },
+    payload: { slug: 'general', tag: 'CURATED', content: '- bullet' },
     ts: '2026-04-22T10:00:00Z',
   });
 
@@ -405,7 +405,7 @@ test('admission: LogWriter.append accepts valid TOPIC_BULLETS_RETIRED', async ()
     isStateBearing: true,
     intentId: 'intent:r1',
     principal: 'curator',
-    payload: { topic: 'project-alpha', superseded_seqs: [1], reason: 'test' },
+    payload: { topic: 'general', superseded_seqs: [1], reason: 'test' },
     ts: '2026-04-22T10:01:00Z',
   });
   assert.equal(result.seq, 2);

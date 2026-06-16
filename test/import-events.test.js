@@ -11,7 +11,7 @@ import {
   importEventLogFile,
   importEventLogDirectory,
 } from '../src/import-jarvis/events.js';
-import { importDirectory } from '../src/import-jarvis/index.js';
+import { importDirectory, importTopicFile } from '../src/import-jarvis/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const EVENTS_FIXTURE = join(__dirname, 'fixtures', 'jarvis-events-sample');
@@ -275,6 +275,29 @@ test('importDirectory: auto-detects topics/+events/ layout and imports both', as
   assert.equal(result.events.totalEvents, 12);
   // Topic events + event log events
   assert.ok(result.eventsEmitted > 12);
+});
+
+test('importTopicFile: forces type=reference when frontmatter omits type (R4-MAJOR-2)', async () => {
+  const { writer } = await freshSilo();
+  // A topic file with NO `type` in frontmatter. Without the forced default, the
+  // TOPIC_METADATA_SET would set no topic_type → the slug stays non-write-
+  // admissible → the very next same-topic summary write_event would be rejected
+  // by the slug-existence guard and importTopicFile would throw.
+  const text = '---\ntopic: typeless-topic\nsummary: a topic with no type field\n---\n\nbody\n';
+  const result = await importTopicFile({
+    path: '/fixtures/typeless-topic.md',
+    text,
+    writer,
+    principal: 'helder',
+    filename: 'typeless-topic.md',
+  });
+  assert.equal(result.slug, 'typeless-topic');
+
+  const state = await interpret(writer);
+  const meta = state.topic_index.get('typeless-topic');
+  assert.equal(meta.topic_type, 'reference', 'type forced to reference');
+  // The summary write_event landed (proves the slug became admissible).
+  assert.ok((state.topic_content.get('typeless-topic') ?? []).length >= 1);
 });
 
 test('importDirectory: legacy flat layout still works (backward compat)', async () => {

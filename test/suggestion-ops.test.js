@@ -187,7 +187,9 @@ test('acceptSuggestion: rejects supporting_seq under non-scan slug', async () =>
     isStateBearing: true,
     intentId: 'intent:1',
     principal: 'helder',
-    payload: { slug: 'other', tag: 'FACT', content: 'wrong slug' },
+    // 'system' is a reserved sink (admissible without creation) that is NOT in
+    // scan_slugs (['general']) — exactly a write_event on a non-scan slug.
+    payload: { slug: 'system', tag: 'FACT', content: 'wrong slug' },
     ts: '2026-04-01T10:00:00Z',
   });
   const sug = await writer.append({

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { LogWriter } from '../src/log/append.js';
 import { interpret } from '../src/interpret/index.js';
 import { retrieve } from '../src/retrieval/index.js';
+import { seedTopic } from './helpers/seed-topic.js';
 
 async function seedCorpus() {
   const dir = await fs.mkdtemp(join(tmpdir(), 'silo-ret-'));
@@ -31,6 +32,12 @@ async function seedCorpus() {
     payload: { principal: 'alice', class: 'human' },
     ts: '2026-04-22T09:00:01Z',
   });
+
+  // Create the topics first (slug-existence guard, v0.2.5) so the corpus
+  // write_events are admissible. Metadata-only; ACL still seeds on first write.
+  for (const slug of ['project-alpha', 'project-beta', 'shopping', 'hs-db-bug', 'alice-notes']) {
+    await seedTopic(writer, slug);
+  }
 
   // A bunch of writes across different topics
   const writes = [

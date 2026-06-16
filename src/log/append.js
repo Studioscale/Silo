@@ -38,6 +38,7 @@ import { acquireFlock, releaseFlock } from './file-lock.js';
 import { interpret } from '../interpret/index.js';
 import { loadMatrix } from '../matrix/load.js';
 import { AdmissionError } from './admission-error.js';
+import { buildAdmissionContext, guardSlugExistence } from '../admission/slug-existence.js';
 
 // Matrix oracle — process-singleton. Loaded once at module init; tests that
 // need a fresh matrix can pass a custom path through future API extensions
@@ -165,9 +166,10 @@ export class LogWriter {
   }
 
   /**
-   * Public: append a single entry. Acquires flock + refreshes tail + delegates
-   * to _appendUnlocked. Admission validation happens inside the unlocked
-   * primitive — wrappers do NOT pre-validate.
+   * Public: append a single entry. Acquires flock + refreshes tail + builds the
+   * lock-scoped admission context (slug-existence guard, v0.2.5) + delegates to
+   * _appendUnlocked. Admission validation happens inside the unlocked primitive
+   * — wrappers do NOT pre-validate.
    *
    * @param {Object} args - see buildEntry parameters
    * @returns {Promise<{seq: number, hash: string, entry: Object}>}
@@ -177,7 +179,8 @@ export class LogWriter {
       const handle = await acquireFlock(this.siloDir);
       try {
         this._tail = await this._scanTailUnlocked();
-        return await this._appendUnlocked(args);
+        const admissionContext = await this._freshAdmissionContext();
+        return await this._appendUnlocked(args, admissionContext);
       } finally {
         await releaseFlock(handle);
       }
@@ -196,11 +199,24 @@ export class LogWriter {
       const handle = await acquireFlock(this.siloDir);
       try {
         this._tail = await this._scanTailUnlocked();
-        return await this._appendBatchUnlocked(entries);
+        const admissionContext = await this._freshAdmissionContext();
+        return await this._appendBatchUnlocked(entries, admissionContext);
       } finally {
         await releaseFlock(handle);
       }
     });
+  }
+
+  /**
+   * Build the ephemeral, lock-scoped admission context for a bare public append
+   * (slug-existence guard, v0.2.5 §4.2 / R4-MAJOR-1). MUST be called with the
+   * flock held and the tail freshly rescanned — folds the log ONCE here so the
+   * guard never re-folds per entry (the O(N²) trap). `withAppendLock` callers
+   * build the context from their EXISTING freshState instead (no double-fold).
+   */
+  async _freshAdmissionContext() {
+    const freshState = await interpret(this);
+    return buildAdmissionContext(freshState);
   }
 
   /**
@@ -213,6 +229,12 @@ export class LogWriter {
    *
    * Used by MCP `accept_suggestion` / `dismiss_suggestion` to re-validate
    * suggestion state under the lock before committing the batch.
+   *
+   * The callback also receives `admissionContext` — the lock-scoped
+   * slug-existence context (v0.2.5) built ONCE from this session's freshState
+   * (no second fold). Callers that append must forward it to
+   * `_appendBatchUnlocked` so write_events are guarded and every append passes
+   * the session-level tail-safety gate.
    */
   async withAppendLock(asyncFn) {
     return this._locked(async () => {
@@ -220,10 +242,12 @@ export class LogWriter {
       try {
         this._tail = await this._scanTailUnlocked();
         const freshState = await interpret(this);
+        const admissionContext = buildAdmissionContext(freshState);
         return await asyncFn({
           writer: this,
           freshTail: this._tail,
           freshState,
+          admissionContext,
         });
       } finally {
         await releaseFlock(handle);
@@ -235,10 +259,11 @@ export class LogWriter {
    * Single-entry primitive. Internal/test use only — callers inside
    * `withAppendLock` may use this directly to avoid re-entering the lock.
    * Validates payload, builds entry, persists, updates tail. Does NOT
-   * acquire any lock.
+   * acquire any lock. `admissionContext` (v0.2.5) is forwarded to the batch
+   * primitive — required for a write_event, see `_appendBatchUnlocked`.
    */
-  async _appendUnlocked(args) {
-    const [result] = await this._appendBatchUnlocked([args]);
+  async _appendUnlocked(args, admissionContext = null) {
+    const [result] = await this._appendBatchUnlocked([args], admissionContext);
     return result;
   }
 
@@ -253,12 +278,44 @@ export class LogWriter {
    *   - validatePayloadForAppend sees maxKnownSeq = tail.seq + stagedCount,
    *     so retire-style payloads cannot reference entries staged in the
    *     SAME batch (only entries previously persisted).
+   *
+   * `admissionContext` (v0.2.5, slug-existence guard) is the ephemeral
+   * lock-scoped context built by the public entrypoints / `withAppendLock`.
+   * When supplied it enforces, under the same lock:
+   *   - the session-level TAIL-SAFETY GATE (spec §4.2/G8/build-note #2):
+   *     refuse if the physical tail seq != the folded last_seq — a broken
+   *     physical tail an append would silently orphan onto. Generalizes
+   *     `silo retire`'s per-op gate to EVERY append (write_event AND
+   *     TOPIC_METADATA_SET), so topic creation can't orphan either.
+   *   - the per-entry SLUG-EXISTENCE GUARD (§4.1-§4.3): a write_event is
+   *     admitted only to a reserved sink / write-admissible / intra-batch-
+   *     staged slug. A write_event with NO context is rejected (G2).
    */
-  async _appendBatchUnlocked(entriesInput) {
+  async _appendBatchUnlocked(entriesInput, admissionContext = null) {
     if (!Array.isArray(entriesInput) || entriesInput.length === 0) {
       throw new Error('_appendBatchUnlocked: non-empty array required');
     }
     const tail = this._tail ?? { seq: 0, hash: GENESIS_HASH };
+
+    // ── TAIL-SAFETY GATE (spec §4.2/G8/build-note #2) ──
+    // Session/append-level. `_scanTailUnlocked` is hash-chain-BLIND: it returns
+    // the last syntactically-valid line as the physical tail, and a new append
+    // chains onto THAT. If the physical tail is itself broken/malformed,
+    // interpret() skipped it AND would skip our new append (which chains onto
+    // the skipped tail) — silently orphaning the write while we return success.
+    // context.stateSeq is the last FOLDED seq; tail.seq is the physical tail
+    // seq. They are equal iff interpret accepted the physical tail; they differ
+    // ONLY on a broken/unfolded tail — never on a historical MIDDLE break
+    // (those re-sync, the tail stays folded). Mirrors retire's gate exactly.
+    // Seq-compare, NOT hash-compare (tail_hash inits null vs GENESIS_HASH on an
+    // empty log, so a hash form would false-positive at genesis; the integer
+    // form degrades to 0 === 0). Inert on a healthy tail.
+    if (admissionContext && tail.seq !== admissionContext.stateSeq) {
+      throw new AdmissionError('LOG_TAIL_NOT_INTERPRETABLE', {
+        last_seq: admissionContext.stateSeq,
+        tail_seq: tail.seq,
+      });
+    }
 
     const staged = []; // [{ entry, bytes, hash }]
     for (let i = 0; i < entriesInput.length; i++) {
@@ -303,6 +360,15 @@ export class LogWriter {
         { type, payload },
         { maxKnownSeq: tail.seq },
       );
+
+      // ── SLUG-EXISTENCE GUARD (v0.2.5, spec §4.1-§4.3) ──
+      // Beside the matrix gate (throws AdmissionError). Runs AFTER payload
+      // validation so a malformed slug surfaces its precise shape error first.
+      // Admits a write_event only to a reserved sink / write-admissible /
+      // intra-batch-staged slug; a TOPIC_METADATA_SET(type) stages its slug for
+      // later same-batch writes. Processing entries in order makes staging
+      // causal (a creation earlier in the batch admits a write later in it).
+      guardSlugExistence({ type, payload }, admissionContext);
 
       const hashPrev = i === 0 ? tail.hash : staged[i - 1].hash;
       const entry = buildEntry({

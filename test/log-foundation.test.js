@@ -31,7 +31,7 @@ async function freshSilo() {
   return { dir, writer };
 }
 
-function makeWriteEvent({ slug = 'test', content = 'hello', tag = 'FACT', intentId, ts }) {
+function makeWriteEvent({ slug = 'general', content = 'hello', tag = 'FACT', intentId, ts }) {
   return {
     type: 'write_event',
     isStateBearing: true,
@@ -91,9 +91,9 @@ test('foundation: _scanTailUnlocked falls back to prior file when latest is all-
 test('foundation: batchAppend chains hashes within the batch', async () => {
   const { writer } = await freshSilo();
   const results = await writer.batchAppend([
-    makeWriteEvent({ slug: 't1', content: 'one', intentId: 'intent:1', ts: '2026-04-22T10:00:00Z' }),
-    makeWriteEvent({ slug: 't2', content: 'two', intentId: 'intent:2', ts: '2026-04-22T10:00:01Z' }),
-    makeWriteEvent({ slug: 't3', content: 'three', intentId: 'intent:3', ts: '2026-04-22T10:00:02Z' }),
+    makeWriteEvent({ slug: 'general', content: 'one', intentId: 'intent:1', ts: '2026-04-22T10:00:00Z' }),
+    makeWriteEvent({ slug: 'general', content: 'two', intentId: 'intent:2', ts: '2026-04-22T10:00:01Z' }),
+    makeWriteEvent({ slug: 'general', content: 'three', intentId: 'intent:3', ts: '2026-04-22T10:00:02Z' }),
   ]);
   assert.equal(results.length, 3);
   assert.equal(results[0].seq, 1);
@@ -133,7 +133,7 @@ test('foundation: batch admission validation rejects bad payload mid-batch', asy
     isStateBearing: true,
     intentId: 'intent:seed',
     principal: 'curator',
-    payload: { slug: 'demo', tag: 'CURATED', content: '- existing' },
+    payload: { slug: 'general', tag: 'CURATED', content: '- existing' },
     ts: '2026-04-22T10:00:00Z',
   });
 
@@ -176,7 +176,7 @@ test('foundation: batch retire cannot reference a seq STAGED in the same batch',
           isStateBearing: true,
           intentId: 'intent:curated',
           principal: 'curator',
-          payload: { slug: 'demo', tag: 'CURATED', content: '- staged bullet' },
+          payload: { slug: 'general', tag: 'CURATED', content: '- staged bullet' },
           ts: '2026-04-22T10:00:00Z',
         },
         {
@@ -184,7 +184,7 @@ test('foundation: batch retire cannot reference a seq STAGED in the same batch',
           isStateBearing: true,
           intentId: 'intent:retire-staged',
           principal: 'curator',
-          payload: { topic: 'demo', superseded_seqs: [1] }, // seq 1 is staged this batch
+          payload: { topic: 'general', superseded_seqs: [1] }, // seq 1 is staged this batch
           ts: '2026-04-22T10:00:01Z',
         },
       ]),
@@ -205,7 +205,7 @@ test('foundation: admission validation happens once (in _appendUnlocked), not tw
     isStateBearing: true,
     intentId: 'intent:seed',
     principal: 'curator',
-    payload: { slug: 'demo', tag: 'CURATED', content: '- existing' },
+    payload: { slug: 'general', tag: 'CURATED', content: '- existing' },
     ts: '2026-04-22T10:00:00Z',
   });
   await assert.rejects(
@@ -246,11 +246,11 @@ test('foundation: withAppendLock provides {writer, freshTail, freshState}', asyn
 
 test('foundation: withAppendLock allows nested _appendBatchUnlocked', async () => {
   const { writer } = await freshSilo();
-  await writer.withAppendLock(async ({ writer: w }) => {
+  await writer.withAppendLock(async ({ writer: w, admissionContext }) => {
     await w._appendBatchUnlocked([
       makeWriteEvent({ intentId: 'intent:1', ts: '2026-04-22T10:00:00Z' }),
       makeWriteEvent({ intentId: 'intent:2', ts: '2026-04-22T10:00:01Z' }),
-    ]);
+    ], admissionContext);
   });
   assert.equal(writer.tail().seq, 2);
 });

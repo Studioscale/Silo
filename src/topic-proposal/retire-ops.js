@@ -100,7 +100,7 @@ export async function retireBullet(writer, input) {
   const principal = input.principal ?? DEFAULT_PRINCIPAL;
 
   let result;
-  await writer.withAppendLock(async ({ writer: w, freshTail, freshState }) => {
+  await writer.withAppendLock(async ({ writer: w, freshTail, freshState, admissionContext }) => {
     // ── TAIL-SAFETY GATE (proposals/retire-primitive.md §4.5). ──
     // _scanTailUnlocked is hash-chain-BLIND: it returns the last
     // syntactically-valid line as the tail without verifying hash_prev, and a
@@ -182,7 +182,7 @@ export async function retireBullet(writer, input) {
       intentId: `intent:${uuidv7()}`,
       principal,
       payload,
-    }]);
+    }], admissionContext);
     result = { retired: true, slug, seqs, count: seqs.length, retired_seq: appended.seq };
   });
 

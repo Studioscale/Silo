@@ -4,7 +4,7 @@ A structured memory architecture for AI assistants that actually works across se
 
 Silo replaces flat memory files (like OpenClaw's `MEMORY.md` or Claude Code's built-in memory) with a three-layer topic file system, a tagged event log, and automated extraction/curation pipelines. The result: your AI assistant remembers what matters, forgets what doesn't, and can tell you *when* and *why* something changed.
 
-> **Status (2026-06):** v0.2.4 (implementing the v12.5 spec) in production on a single-user Hetzner VPS managing ~25 knowledge domains. 560 unit tests passing. Spec finalized after 57 audit rounds across 19 drafts (three independent reviewers per round — Claude, ChatGPT, Gemini). Implementation in [`src/`](src/), described in [IMPLEMENTATION.md](IMPLEMENTATION.md).
+> **Status (2026-06):** v0.2.5 (implementing the v12.5 spec) in production on a single-user Hetzner VPS managing ~25 knowledge domains. 592 unit tests passing. Spec finalized after 57 audit rounds across 19 drafts (three independent reviewers per round — Claude, ChatGPT, Gemini). Implementation in [`src/`](src/), described in [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
 ```
                 Telegram / IDE / MCP client

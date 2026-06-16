@@ -267,13 +267,14 @@ test('validateClusterProposal: rejects fingerprint overlap with pending suggesti
 
 test('validateClusterProposal: rejects supporting_seq under non-scan slug (hallucination guard)', async () => {
   const { writer } = await freshSilo();
-  // Seed an event under a NON-scan slug.
+  // Seed an event under a NON-scan slug. 'system' is a reserved sink
+  // (admissible without creation) and is NOT in scan_slugs (['general']).
   await writer.append({
     type: 'write_event',
     isStateBearing: true,
     intentId: 'intent:s',
     principal: 'helder',
-    payload: { slug: 'other', tag: 'FACT', content: 'something' },
+    payload: { slug: 'system', tag: 'FACT', content: 'something' },
     ts: '2026-04-01T10:00:00Z',
   });
   const state = await interpret(writer);

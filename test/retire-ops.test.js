@@ -21,6 +21,8 @@ import {
   DEFAULT_PRINCIPAL,
   RETIRE_SOURCE,
 } from '../src/topic-proposal/retire-ops.js';
+import { seedTopic } from './helpers/seed-topic.js';
+import { appendUnsafeForTest } from './helpers/append-unsafe.js';
 
 async function freshSilo() {
   const dir = await fs.mkdtemp(join(tmpdir(), 'silo-retire-test-'));
@@ -30,7 +32,10 @@ async function freshSilo() {
 }
 
 // Append N CURATED write_events on `slug`; return their seqs (ascending).
+// Creates the topic first (slug-existence guard, v0.2.5) so the CURATED writes
+// are admissible. seedTopic is idempotent-safe (latest-wins metadata).
 async function seedCurated(writer, { slug, bullets, principal = 'helder' }) {
+  await seedTopic(writer, slug);
   const seqs = [];
   for (let i = 0; i < bullets.length; i++) {
     const r = await writer.append({
@@ -48,6 +53,7 @@ async function seedCurated(writer, { slug, bullets, principal = 'helder' }) {
 
 // Append a single write_event with an arbitrary tag; return its seq.
 async function seedTagged(writer, { slug, tag, content = 'x', principal = 'helder' }) {
+  await seedTopic(writer, slug);
   const r = await writer.append({
     type: 'write_event',
     isStateBearing: true,
@@ -294,10 +300,14 @@ test('retire: tail-gate ALLOWS across a historical MIDDLE break (re-synced tail)
   // Append a re-syncing valid tail that chains back to seed2 (NOT to the broken
   // middle): point _tail at {seq of the broken line, hash of seed2}.
   writer._tail = { seq: seed2seq + 1, hash: h2, logFile: writer.tail().logFile };
-  await writer._appendBatchUnlocked([{
+  // Build the re-syncing tail via the unsafe helper: it chains onto the
+  // manually-set _tail exactly as _appendBatchUnlocked would (same seq + hash),
+  // but skips the guard/tail-gate — this line is SCAFFOLDING to forge the
+  // re-synced state, not the unit under test (retireBullet's gate is).
+  await appendUnsafeForTest(writer, {
     type: 'write_event', isStateBearing: true, intentId: 'intent:resync-tail',
     principal: 'operator', payload: { slug: 'pets', tag: 'CURATED', content: '- resync tail' },
-  }]);
+  });
 
   // Sanity: a break is present but the physical tail is folded.
   const pre = await interpret(writer);

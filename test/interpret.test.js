@@ -43,7 +43,7 @@ async function seedBasicLog(writer) {
     payload: { principal: 'helder' },
     ts: '2026-04-22T10:00:02Z',
   });
-  await writer.append({
+  await appendUnsafeForTest(writer, {
     type: 'write_event',
     isStateBearing: true,
     intentId: 'intent:w1',
@@ -51,7 +51,7 @@ async function seedBasicLog(writer) {
     payload: { slug: 'project-alpha', tag: 'FACT', content: 'initial state' },
     ts: '2026-04-22T10:01:00Z',
   });
-  await writer.append({
+  await appendUnsafeForTest(writer, {
     type: 'write_event',
     isStateBearing: true,
     intentId: 'intent:w2',
@@ -163,7 +163,7 @@ test('interpret: RECOVERY_MODE_ENTERED / EXITED toggles current_mode', async () 
 
 test('interpret: ACL_SEALED updates acl_table', async () => {
   const { writer } = await freshSilo();
-  await writer.append({
+  await appendUnsafeForTest(writer, {
     type: 'write_event',
     isStateBearing: true,
     intentId: 'intent:w1',
@@ -203,7 +203,7 @@ test('interpret: dedup witness populated with intent_ids', async () => {
 test('interpret: with matrix, enforces registry-authoritative is_state_bearing', async () => {
   const { writer } = await freshSilo();
   // Build an entry claiming is_state_bearing: false for a type that's registered true
-  await writer.append({
+  await appendUnsafeForTest(writer, {
     type: 'write_event',
     isStateBearing: false, // <- client wants false
     intentId: 'intent:bad',
@@ -243,7 +243,7 @@ test('interpret: TOPIC_BULLETS_RETIRED populates retired_curated_seqs', async ()
     ts: '2026-04-22T10:00:01Z',
   });
   // Two CURATED writes on topic-A
-  await writer.append({
+  await appendUnsafeForTest(writer, {
     type: 'write_event',
     isStateBearing: true,
     intentId: 'intent:cA1',
@@ -251,7 +251,7 @@ test('interpret: TOPIC_BULLETS_RETIRED populates retired_curated_seqs', async ()
     payload: { slug: 'topic-a', tag: 'CURATED', content: '- old port 8080' },
     ts: '2026-04-22T10:01:00Z',
   });
-  await writer.append({
+  await appendUnsafeForTest(writer, {
     type: 'write_event',
     isStateBearing: true,
     intentId: 'intent:cA2',
@@ -260,7 +260,7 @@ test('interpret: TOPIC_BULLETS_RETIRED populates retired_curated_seqs', async ()
     ts: '2026-04-22T10:01:01Z',
   });
   // One CURATED write on topic-B (must NOT be retired by topic-A's retire event)
-  await writer.append({
+  await appendUnsafeForTest(writer, {
     type: 'write_event',
     isStateBearing: true,
     intentId: 'intent:cB1',
@@ -389,7 +389,7 @@ test('interpret: is total — malformed entry does not throw, surfaces in skippe
   const dir = await fs.mkdtemp(join(tmpdir(), 'silo-mal-'));
   const writer = new LogWriter(dir);
   await writer.init();
-  await writer.append({
+  await appendUnsafeForTest(writer, {
     type: 'write_event',
     isStateBearing: true,
     intentId: 'intent:good',

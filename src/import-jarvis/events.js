@@ -20,6 +20,7 @@
 import { promises as fs } from 'node:fs';
 import { join, basename } from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
+import { isSlugWriteAdmissible } from '../admission/slug-existence.js';
 
 const TAG_LINE_RE = /^\[(?<auto>AUTO-)?(?<tag>[A-Z]+)(?::(?<conf>[A-Z]+))?\]\s+(?<slug>[a-z0-9][a-z0-9_-]*)\s*:\s*(?<rest>.*)$/;
 const COMMENT_LINE_RE = /^<!--\s*(.*?)\s*-->$/;
@@ -98,6 +99,12 @@ export async function importEventLogFile({ path, writer, defaultPrincipal = 'hel
   let dateHeader = null; // `# Event Log — 2026-04-04` if present on first non-blank line
   let blankRun = 0; // number of blank lines since the last event/comment
 
+  // Collect the parsed write_events, then append them under ONE locked session
+  // (slug-existence guard, v0.2.5 §4.8 / build-note #4). Per-entry append would
+  // re-fold the whole log for every line (the O(N²) trap, G7); a single batch
+  // folds once and lets the existence-only preflight pre-seed missing slugs.
+  const eventEntries = [];
+
   for (let i = 0; i < lines.length; i++) {
     const rawLine = lines[i];
 
@@ -158,7 +165,7 @@ export async function importEventLogFile({ path, writer, defaultPrincipal = 'hel
     if (parsed.confidence) payload.confidence = parsed.confidence;
     blankRun = 0;
 
-    await writer.append({
+    eventEntries.push({
       type: 'write_event',
       isStateBearing: true,
       intentId: `intent:${uuidv7()}`,
@@ -167,6 +174,33 @@ export async function importEventLogFile({ path, writer, defaultPrincipal = 'hel
       ts,
     });
     eventCount += 1;
+  }
+
+  // ── Existence-only preflight + single batched append (v0.2.5 §4.8). ──
+  // Under one lock: create any slug that is not yet write-admissible via a
+  // TOPIC_METADATA_SET(type='reference'), then append every event in the same
+  // batch. Intra-batch staging admits each event onto its (now-created) slug.
+  if (eventEntries.length > 0) {
+    await writer.withAppendLock(async ({ writer: w, admissionContext }) => {
+      const creations = [];
+      const seen = new Set();
+      for (const e of eventEntries) {
+        const slug = e.payload.slug;
+        if (seen.has(slug)) continue;
+        seen.add(slug);
+        if (!isSlugWriteAdmissible(slug, admissionContext)) {
+          creations.push({
+            type: 'TOPIC_METADATA_SET',
+            isStateBearing: true,
+            intentId: `intent:${uuidv7()}`,
+            principal: defaultPrincipal,
+            payload: { topic: slug, type: 'reference', status: 'active' },
+            ts: `${date}T12:00:00Z`,
+          });
+        }
+      }
+      await w._appendBatchUnlocked([...creations, ...eventEntries], admissionContext);
+    });
   }
 
   return { date, eventCount, unrecognizedCount, filename };

@@ -26,7 +26,7 @@ test('LogWriter: single append yields seq 1, hash_prev = genesis', async () => {
     isStateBearing: true,
     intentId: 'intent:abc',
     principal: 'helder',
-    payload: { slug: 'test', content: 'hello' },
+    payload: { slug: 'general', content: 'hello' },
     ts: '2026-04-22T10:00:00Z',
   });
   assert.equal(result.seq, 1);
@@ -41,7 +41,7 @@ test('LogWriter: second append chains correctly', async () => {
     isStateBearing: true,
     intentId: 'intent:a',
     principal: 'helder',
-    payload: { slug: 't1', content: 'one' },
+    payload: { slug: 'general', content: 'one' },
     ts: '2026-04-22T10:00:00Z',
   });
   const second = await writer.append({
@@ -49,7 +49,7 @@ test('LogWriter: second append chains correctly', async () => {
     isStateBearing: true,
     intentId: 'intent:b',
     principal: 'helder',
-    payload: { slug: 't2', content: 'two' },
+    payload: { slug: 'general', content: 'two' },
     ts: '2026-04-22T10:00:01Z',
   });
   assert.equal(second.seq, 2);
@@ -65,7 +65,7 @@ test('LogWriter: concurrent appends serialize deterministically', async () => {
     isStateBearing: true,
     intentId: `intent:${i}`,
     principal: 'helder',
-    payload: { slug: `t${i}`, content: `content-${i}` },
+    payload: { slug: 'general', content: `content-${i}` },
     ts: `2026-04-22T10:00:${String(i).padStart(2, '0')}Z`,
   }));
   // Fire all concurrently
@@ -85,7 +85,7 @@ test('LogWriter: readAll iterates committed entries in order', async () => {
       isStateBearing: true,
       intentId: `intent:${i}`,
       principal: 'helder',
-      payload: { slug: 'demo', content: `msg-${i}` },
+      payload: { slug: 'general', content: `msg-${i}` },
       ts: `2026-04-22T10:00:${String(i).padStart(2, '0')}Z`,
     });
   }
@@ -108,7 +108,7 @@ test('LogWriter: hash chain integrity verifiable end-to-end', async () => {
       isStateBearing: true,
       intentId: `intent:${i}`,
       principal: 'helder',
-      payload: { slug: 'demo', content: `msg-${i}` },
+      payload: { slug: 'general', content: `msg-${i}` },
       ts: `2026-04-22T10:00:${String(i).padStart(2, '0')}Z`,
     });
   }
@@ -129,7 +129,7 @@ test('LogWriter: init picks up existing log on reopen', async () => {
     isStateBearing: true,
     intentId: 'intent:a',
     principal: 'helder',
-    payload: { slug: 'demo', content: 'before close' },
+    payload: { slug: 'general', content: 'before close' },
     ts: '2026-04-22T10:00:00Z',
   });
   const tailHash = writer.tail().hash;
@@ -146,7 +146,7 @@ test('LogWriter: init picks up existing log on reopen', async () => {
     isStateBearing: true,
     intentId: 'intent:b',
     principal: 'helder',
-    payload: { slug: 'demo', content: 'after reopen' },
+    payload: { slug: 'general', content: 'after reopen' },
     ts: '2026-04-22T11:00:00Z',
   });
   assert.equal(result.seq, 2);
