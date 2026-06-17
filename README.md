@@ -41,7 +41,7 @@ Most AI memory systems work like this:
 **Domain-organized topic files.** Each subject (a project, a person, a hobby, a business domain) gets its own file with three physical layers:
 - **Layer 1 (Header):** Metadata — slug, type, tags, entities, status, dates, summary
 - **Layer 2 (Curated Facts):** The truth. Structured, distilled knowledge. Updated in place with mandatory changelog entries. This is what your AI loads when the topic is relevant.
-- **Layer 3 (Source Material):** Raw conversation excerpts and context. Never loaded directly — searchable via BM25 and semantic search. Preserves provenance.
+- **Layer 3 (Source Material):** Raw conversation excerpts and context. Never loaded directly — searchable via BM25 (lexical) keyword search. Preserves provenance.
 
 **Tagged event log.** Every fact, decision, change, and action item gets a one-line entry with a topic slug and a standardized tag:
 ```
@@ -57,14 +57,17 @@ Most AI memory systems work like this:
 
 **Topic suggestion.** When facts accumulate under the generic `general` slug (no dedicated topic file), a nightly detection pipeline (`silo suggest --run-now`, cron-driven) clusters them and writes `TOPIC_SUGGESTED` events to the log. The MCP server surfaces pending suggestions via a `_silo_notices` array on `read_index` / `search` / `list_handoffs` responses, plus a dedicated `list_pending_suggestions` tool. The user says yes/no in conversation — `accept_suggestion` emits an atomic (TOPIC_METADATA_SET, TOPIC_SUGGESTION_ACCEPTED) batch and the topic file appears on the next regen; `dismiss_suggestion` records a per-slug cooldown so the same cluster doesn't re-propose until the cooldown expires. Operator-side admin via `silo suggest --list / --accept / --dismiss / --status`.
 
-**Search hierarchy.** Seven levels, cheapest first:
+**Search hierarchy.** Cheapest first:
 1. Current context (free)
 2. Topic index scan (free, already loaded)
 3. Loaded topic file Layer 2 (free, already in context)
 4. Today's event log (free, already loaded)
 5. BM25 keyword search (free, local)
-6. Semantic search (cheap, ~1-3c/query)
-7. Ask the user (free, last resort)
+6. Ask the user (free, last resort)
+
+Search is lexical only (BM25 / MiniSearch, with query normalization). There is
+no semantic / vector retrieval today; it would help most on large histories and
+multi-evidence questions (see `eval/longmemeval/`).
 
 ## Numbers
 
@@ -378,11 +381,9 @@ read-path integrity (hash chain) are different defenses.
 ## Architecture deep dive
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — Full system design
-- [reference/search-hierarchy.md](reference/search-hierarchy.md) — The 7-level search system
-- [reference/curation-pipeline.md](reference/curation-pipeline.md) — How automated curation works
-- [reference/extraction-pipeline.md](reference/extraction-pipeline.md) — How session extraction works
-- [reference/topic-suggestion-pipeline.md](reference/topic-suggestion-pipeline.md) — How topic detection works
+- [IMPLEMENTATION.md](IMPLEMENTATION.md) — Implementation detail
 - [reference/comparison.md](reference/comparison.md) — Silo vs MEMORY.md vs MemPalace vs SimpleMem
+- [reference/adapting-to-other-platforms.md](reference/adapting-to-other-platforms.md) — Running Silo on platforms other than OpenClaw
 - [CHANGELOG.md](CHANGELOG.md) — release history + migration notes (read this before upgrading from a pre-0.2.0 install)
 
 ## Origin

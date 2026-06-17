@@ -12,9 +12,29 @@
  */
 
 import MiniSearch from 'minisearch';
+import { tokenize } from '../distill/tokenize.js';
 
 export const ORIENTATION_MAX_N = 50;
 export const ORIENTATION_DEFAULT_N = 10;
+
+/**
+ * Normalize a free-text query before lexical search: drop stop-words / very
+ * short tokens via Silo's shared tokenizer, so signal terms aren't drowned by
+ * function words in the AND→OR fallback. Falls back to the raw query when
+ * everything was filtered (an all-stop-word query, or a bare slug).
+ *
+ * Measured on LongMemEval (eval/longmemeval/): lifts session recall_any@5 from
+ * 76%→91% (_S, official scorer), at zero added dependency. Lexical retrieval
+ * still trails semantic — more so on large histories and on the strict
+ * recall_all metric. Applied to context_retrieval (natural-language "relevant
+ * memory" queries); exact_lookup keeps the raw query for precise slug/term
+ * matching.
+ */
+export function normalizeQuery(query) {
+  if (typeof query !== 'string') return query;
+  const kw = tokenize(query).join(' ');
+  return kw || query;
+}
 
 /**
  * Build a search index from State.topic_index + State.topic_content.
@@ -141,7 +161,10 @@ function exactLookup(state, query, principal, flags, limit) {
  */
 function contextRetrieval(state, query, principal, flags, limit) {
   const index = buildIndex(state);
-  const raw = index.search(query, {
+  // Strip stop-words from the query so signal terms drive the AND match
+  // instead of being drowned in the OR fallback (see normalizeQuery).
+  const q = normalizeQuery(query);
+  const raw = index.search(q, {
     boost: { slug: 2, tags: 1.5, content: 1 },
     fuzzy: 0.3,
     prefix: true,
@@ -150,7 +173,7 @@ function contextRetrieval(state, query, principal, flags, limit) {
 
   // Relax to OR if AND returned nothing
   const hits = raw.length === 0
-    ? index.search(query, { boost: { slug: 2, tags: 1.5, content: 1 }, fuzzy: 0.3, prefix: true, combineWith: 'OR' })
+    ? index.search(q, { boost: { slug: 2, tags: 1.5, content: 1 }, fuzzy: 0.3, prefix: true, combineWith: 'OR' })
     : raw;
 
   const authed = hits.filter((hit) => authorize(state, hit.evidence_topics, principal));

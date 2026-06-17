@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LogWriter } from '../src/log/append.js';
 import { interpret } from '../src/interpret/index.js';
-import { retrieve } from '../src/retrieval/index.js';
+import { retrieve, normalizeQuery } from '../src/retrieval/index.js';
 import { seedTopic } from './helpers/seed-topic.js';
 
 async function seedCorpus() {
@@ -255,4 +255,27 @@ test('retrieve: orientation_view ordered by last_updated_seq desc (deterministic
     const curr = result.topics[i].last_updated_seq ?? 0;
     assert.ok(prev >= curr, `topic ordering broken at index ${i}`);
   }
+});
+
+// ── query normalization (LongMemEval-driven, eval/longmemeval/) ──────────────
+
+test('normalizeQuery: strips stop-words, keeps signal terms, falls back when empty', () => {
+  const out = normalizeQuery('What degree did I graduate with?');
+  assert.ok(out.includes('degree') && out.includes('graduate'), 'signal terms kept');
+  assert.ok(!/\bdid\b/.test(out) && !/\bwith\b/.test(out), 'stop-words dropped');
+  // All-stop-word / too-short queries fall back to the raw query (never empty).
+  assert.equal(normalizeQuery('is it'), 'is it');
+  assert.equal(normalizeQuery('a'), 'a');
+});
+
+test('context_retrieval normalizes the query — a stop-word-heavy question still finds the topic', async () => {
+  const { state } = await seedCorpus();
+  const r = retrieve({
+    state,
+    query: 'so what was the supplier that we ended up choosing',
+    mode: 'context_retrieval',
+    principal: 'helder',
+  });
+  assert.ok(r.results.some((x) => x.slug === 'project-alpha'),
+    'project-alpha (the supplier-choice topic) should surface despite the stop-words');
 });

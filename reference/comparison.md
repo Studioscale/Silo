@@ -17,7 +17,7 @@ Optional "dreaming" system for background consolidation.
 | Confidence | CONFIRMED / TENTATIVE / CONTEXT | None |
 | Staleness | Per-topic `last_verified` dates | None |
 | Curation | Nightly pipeline, targeted | Dreaming (experimental, all-or-nothing) |
-| Search | BM25 + semantic hybrid | Same infrastructure (shared) |
+| Search | BM25 / lexical (no semantic) | Same infrastructure (shared) |
 | Maintenance | Custom scripts, cron jobs | Zero |
 | Upgrade risk | Scripts may need updates | None (built-in) |
 
@@ -36,10 +36,10 @@ using ChromaDB vector storage with regex-based classification.
 
 | | Silo | MemPalace |
 |---|---|---|
-| LLM dependency | GPT-4o extraction, GPT-4o-mini curation | Zero LLM calls |
+| LLM dependency | claude-sonnet-4-6 (or gpt-5.4) extraction + curation | Zero LLM calls |
 | Cost | ~$2-6/month | $0 |
 | Retrieval (benchmark) | Not benchmarked | 96.6% R@5 (LongMemEval) |
-| Search | BM25 + semantic hybrid | Semantic only (production) |
+| Search | BM25 / lexical (no semantic) | Semantic only (production) |
 | Curation | Nightly automated pipeline | None (filed once, never revisited) |
 | Organization | Structured topic files | Flat vector store with metadata tags |
 | Changelogs | Full audit trail | None |
@@ -51,7 +51,7 @@ using ChromaDB vector storage with regex-based classification.
 with no API keys. If you want "install and forget" personal memory.
 
 **When Silo wins:** Curated knowledge > raw accumulation. Domain organization.
-Changelogs. Confidence tracking. Hybrid search catches what semantic search misses.
+Changelogs. Confidence tracking. A full audit trail of when and why every fact changed. (Search is lexical-only — on raw retrieval recall, semantic systems lead; Silo's edge is curation + audit, not search.)
 
 **MemPalace ideas worth borrowing:**
 - Temporal knowledge graph (valid_from/valid_to on entity relationships)
@@ -73,7 +73,7 @@ Claude's native memory by 64% on LoCoMo benchmark.
 | Organization | Domain-specific topic files | Flat memory entries |
 | Curation | Nightly pipeline | Automatic merge on ingest |
 | Token usage | Reported misleadingly (multiple LLM calls per query) | ~$2-6/month total |
-| Minimum model size | Any LLM for the assistant; GPT-4o for extraction | ~7B+ for structured output |
+| Minimum model size | Any LLM for the assistant; flagship tier (claude-sonnet-4-6 / gpt-5.4) for extraction | ~7B+ for structured output |
 
 **When SimpleMem wins:** Multimodal memory. If you need to remember images and audio.
 
