@@ -36,6 +36,8 @@
  * module enforces payload shape only.
  */
 
+import { rejectRetrievalOrigin } from './retrieval-origin-guard.js';
+
 export const MAX_SUPERSEDED_SEQS = 256;
 export const MAX_SUPPORTING_SEQS = 100; // TOPIC_SUGGESTED
 export const MAX_DISMISS_BATCH = 50; // TOPIC_SUGGESTION_DISMISSED
@@ -537,6 +539,13 @@ function validateWriteEventPayload(payload, _ctx) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     fail('payload', 'must_be_object');
   }
+
+  // No-write choke-point (§4.9, layer 2). EVERY write_event funnels through here
+  // — native, curate, distill, import, CLI — so one guard refuses any
+  // retrieval-origin payload (object marker, JSON dump, or stringified result)
+  // before it can be persisted. This is the mechanical half of the invariant;
+  // an agent re-typing a snippet's prose is the LLM-boundary case it cannot stop.
+  rejectRetrievalOrigin(payload, 'write_event');
 
   // Allowed fields. `imported` is a free-form object preserved from the
   // import-jarvis migration; we permit any sub-keys.
