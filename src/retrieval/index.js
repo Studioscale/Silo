@@ -37,10 +37,16 @@ export function normalizeQuery(query) {
 }
 
 /**
- * Build a search index from State.topic_index + State.topic_content.
- * Each indexed doc is a "topic summary" for M1 (M2 will move to memory cards).
+ * Build a per-TOPIC search index from State.topic_index + State.topic_content,
+ * used by exact_lookup (card-first "find this specific thing").
+ *
+ * #17 (standalone): retired CURATED seqs are EXCLUDED from the indexed content —
+ * a retired bullet must not surface in keyword search. This is a UNIVERSAL
+ * keyword-search behavior change (independent of the semantic feature):
+ * retired = removed; reachable only via the audit log.
  */
 export function buildIndex(state) {
+  const retired = state.retired_curated_seqs ?? new Set();
   const index = new MiniSearch({
     fields: ['slug', 'content', 'tags'],
     storeFields: ['slug', 'last_updated_seq', 'tags', 'evidence_topics', 'content_preview'],
@@ -53,7 +59,10 @@ export function buildIndex(state) {
   const docs = [];
   for (const [slug, meta] of state.topic_index.entries()) {
     const history = state.topic_content.get(slug) ?? [];
-    const content = history.map((h) => h.content).join('\n');
+    const content = history
+      .filter((h) => !retired.has(h.seq)) // #17: retired bullets never surface
+      .map((h) => h.content)
+      .join('\n');
     docs.push({
       id: slug,
       slug,
@@ -215,7 +224,9 @@ function contextRetrieval(state, query, principal, flags, limit) {
 function contentFor(state, slug) {
   const history = state.topic_content.get(slug);
   if (!history) return null;
+  const retired = state.retired_curated_seqs ?? new Set();
   return history
+    .filter((h) => !retired.has(h.seq)) // #17: retired bullets never surface
     .map((h) => `[seq ${h.seq}] [${h.tag ?? 'EVENT'}] ${h.content}`)
     .join('\n');
 }
