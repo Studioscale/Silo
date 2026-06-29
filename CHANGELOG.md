@@ -4,8 +4,21 @@ All notable changes to Silo. Format loosely based on [Keep a Changelog](https://
 
 ## [Unreleased]
 
-### Changed
-- **#17 — retired CURATED bullets no longer surface in keyword search (UNIVERSAL behavior change).** A bullet retired via `TOPIC_BULLETS_RETIRED` is now excluded from `buildIndex`'s indexed content (so it cannot match in `exact_lookup` or `context_retrieval`) AND from the escalated `contentFor` output (so a `full_context` lookup never returns it either). Retired = removed; the bullet remains reachable only through the audit log. This is independent of the (separate, opt-in) semantic feature and applies to every install. Shipped as its own standalone change with its own test (`test/retired-exclusion-17.test.js`). No consumer expected retired bullets in keyword results.
+### Added — local hybrid (lexical ⊕ semantic) search (target v0.3.0)
+
+Optional, strictly opt-in local semantic search fused with the keyword engine via Reciprocal Rank Fusion, with **chunk-level trust tiering** and a **default `scope=curated`**. Off by default — the one universal change is **#17** (below). Search stays **read-only** and is **provably fed into no write** (a tested call-graph invariant). Ratified design: [`proposals/hybrid-search.md`](proposals/hybrid-search.md). Built in the build-brief's order (foundation+cache → no-write guard → lexical-per-unit+RRF+tiering → install+gates+doctor → eval), each step tested and green.
+
+- **#17 (universal, standalone): retired CURATED bullets no longer surface in keyword search** — excluded from `buildIndex`'s per-topic content, the per-unit lexical index, and escalated `contentFor` output. Retired = removed; reachable only via the audit log. (`test/retired-exclusion-17.test.js`.)
+- **Embedder primitive** (`src/embedding/embedder.js`) — triple-gate loader (`semanticEnabled()` = `silo semantic install` marker + `SILO_SEMANTIC=on` + explicit model), pinned model registry (`multilingual-e5-small` / `bge-small-en-v1.5`, 384-dim q8, prefix profiles), fs-ext-style degrade-on-missing. Embedding deps are **not** in `package.json`.
+- **Chunker** (`src/retrieval/chunk.js`) — per-`seq` fixed-window (`max_tokens=512`, `chunk_size=256`, `chunk_overlap=64`), never crossing a seq boundary; identity-manifest fields.
+- **Trust tiers** (`src/retrieval/tiers.js`) — `classifyTier` from raw events (curated/note/source), per-chunk, never rolled up to the slug.
+- **Cache-projection builder** (`src/projection/embed-cache.js`) — built by `silo regenerate` (gated, zero-cost when disabled); content-addressed vector store + occurrence index + split **identity** (rebuild) / **freshness** (use-as-is) manifest; separate projection lock; vector reuse on identity match; retire/orphan pruning that preserves dedup.
+- **Ranker** (`src/retrieval/semantic.js`, `fusion.js`, `provenance.js`) — `liveSearchUnits` driven from State (retired excluded), tier+vector by occurrence-index **lookup only**; cosine; RRF (k=60, 1-based, **absent arm omitted**); `similarity_floor=0.30`, `n_pre=100`, `bounded_prior_cap=0` (tier is a pure label). `contextRetrievalHybrid` adds the semantic arm async with a whole-block try/catch → lexical fallback; tiered envelope (`semantic_status`/`cache_status`, `authoritative/advisory/must_not_write_from` tiers, `grouped_by_tier`, provenance).
+- **No-write invariant** (`src/admission/retrieval-origin-guard.js`) — (1) import-graph lint: write/curate/distill may not import the ranker (`test/no-write-guard.test.js`); (2) choke-point: every `write_event` admission rejects a retrieval-origin payload (object/JSON/stringified/handoff/curate/distill/CLI).
+- **`silo semantic install --model=<key>`** (`src/embedding/install.js`) — explicit model choice (no silent default), dep pins, install marker; `silo doctor` reports semantic status + cache health + per-tier counts.
+- **Eval** — `eval/longmemeval/run-longmemeval.js` gains `--retriever=lexical|semantic|hybrid` and 4 harness-correctness fixes (has_answer gold, user-turns-only index, full-haystack emit, `recall_all@5` headline); `eval/silo-native/` adds a tiered fixture, the answer-level over-trust gate, and the pre-registered promotion bar. Both tracks run offline on tiny fixtures (`test/eval-harness.test.js`).
+
+`scope=all` stays opt-in until the §5 pre-registered bar passes on a holdout (a separate, logged decision).
 
 ## [0.2.5] — 2026-06-16
 

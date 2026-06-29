@@ -13,6 +13,18 @@
 
 import MiniSearch from 'minisearch';
 import { tokenize } from '../distill/tokenize.js';
+import {
+  liveSearchUnits, lexicalRank, semanticRank, loadCache, buildOccMap,
+  deriveCacheStatus, N_PRE, SIMILARITY_FLOOR, BOUNDED_PRIOR_CAP,
+} from './semantic.js';
+import { rrf, RRF_K } from './fusion.js';
+import {
+  tierInScope, TIER_ORDER, AUTHORITATIVE_TIERS, ADVISORY_TIERS, MUST_NOT_WRITE_FROM_TIERS,
+} from './tiers.js';
+import { buildProvenance, queryDigest } from './provenance.js';
+import { CHUNKER_VERSION, CHUNK_SIZE, CHUNK_OVERLAP } from './chunk.js';
+import { stampRetrievalOrigin, RETRIEVAL_ORIGIN_MARKER } from '../admission/retrieval-origin-guard.js';
+import { semanticEnabled, getEmbedder, resolveModelKey, modelConfig as resolveModelConfig } from '../embedding/embedder.js';
 
 export const ORIENTATION_MAX_N = 50;
 export const ORIENTATION_DEFAULT_N = 10;
@@ -38,12 +50,13 @@ export function normalizeQuery(query) {
 
 /**
  * Build a per-TOPIC search index from State.topic_index + State.topic_content,
- * used by exact_lookup (card-first "find this specific thing").
+ * used by exact_lookup (card-first "find this specific thing"). Per-unit lexical
+ * search for context_retrieval lives in semantic.js#lexicalRank.
  *
- * #17 (standalone): retired CURATED seqs are EXCLUDED from the indexed content —
- * a retired bullet must not surface in keyword search. This is a UNIVERSAL
- * keyword-search behavior change (independent of the semantic feature):
- * retired = removed; reachable only via the audit log.
+ * #17 (standalone, hybrid-search §6): retired CURATED seqs are EXCLUDED from the
+ * indexed content — a retired bullet must not surface in keyword search. This is
+ * a behavior change for everyone; documented in CHANGELOG. exact_lookup keeps its
+ * per-topic shape otherwise.
  */
 export function buildIndex(state) {
   const retired = state.retired_curated_seqs ?? new Set();
@@ -111,7 +124,7 @@ function authorize(state, evidenceTopics, requestingPrincipal) {
  * @param {number} [args.limit]
  * @returns {Object} { mode, results, query }
  */
-export function retrieve({ state, query, mode = 'context_retrieval', principal, flags = [], limit = 10, n }) {
+export function retrieve({ state, query, mode = 'context_retrieval', principal, flags = [], limit = 10, n, scope = 'curated', siloDir, env }) {
   if (!state) throw new Error('state required');
   if (!principal) throw new Error('principal required');
 
@@ -119,7 +132,7 @@ export function retrieve({ state, query, mode = 'context_retrieval', principal, 
     case 'exact_lookup':
       return exactLookup(state, query, principal, flags, limit);
     case 'context_retrieval':
-      return contextRetrieval(state, query, principal, flags, limit);
+      return contextRetrieval(state, query, principal, flags, limit, { scope, siloDir, env });
     case 'orientation_view':
       return orientationView(state, principal, { n: n ?? limit });
     default:
@@ -165,60 +178,191 @@ function exactLookup(state, query, principal, flags, limit) {
 }
 
 /**
- * context_retrieval: broader match across content + tags + slug.
- * Deterministic escalation rules per v12.5 §6.2.2.
+ * Shared assembler for context_retrieval (hybrid-search §4.5–§4.7, §4.10, §4.12).
+ *
+ * Drives the candidate set from current State (per-unit, retired excluded), applies
+ * ACL once per slug then scope, runs the lexical arm, intersects a (possibly empty)
+ * semantic arm, fuses via RRF, and emits the tiered envelope. Tier is a LABEL +
+ * bounded prior whose v1 cap is 0 — order is pure fused relevance. Every result and
+ * the envelope are stamped with the retrieval-origin marker (§4.9 choke-point).
  */
-function contextRetrieval(state, query, principal, flags, limit) {
-  const index = buildIndex(state);
-  // Strip stop-words from the query so signal terms drive the AND match
-  // instead of being drowned in the OR fallback (see normalizeQuery).
-  const q = normalizeQuery(query);
-  const raw = index.search(q, {
-    boost: { slug: 2, tags: 1.5, content: 1 },
-    fuzzy: 0.3,
-    prefix: true,
-    combineWith: 'AND',
+function assembleContext({
+  state, query, principal, flags, limit, scope,
+  enabled, occMap, cache, semantic, semantic_status, cache_status, modelCfg, corpus, retriever,
+}) {
+  const digest = queryDigest(query);
+
+  let units = liveSearchUnits(state, occMap);
+
+  // ACL once per slug (§4.5), BEFORE ranking.
+  const slugAllowed = new Map();
+  units = units.filter((u) => {
+    if (!slugAllowed.has(u.slug)) slugAllowed.set(u.slug, authorize(state, [u.slug], principal));
+    return slugAllowed.get(u.slug);
   });
 
-  // Relax to OR if AND returned nothing
-  const hits = raw.length === 0
-    ? index.search(q, { boost: { slug: 2, tags: 1.5, content: 1 }, fuzzy: 0.3, prefix: true, combineWith: 'OR' })
-    : raw;
+  // scope filter — meaningful only when tiers are real (semantic enabled). When
+  // disabled, behave "as today": return all keyword matches (§3 off-path).
+  if (enabled) units = units.filter((u) => tierInScope(u.tier, scope));
 
-  const authed = hits.filter((hit) => authorize(state, hit.evidence_topics, principal));
+  const unitByKey = new Map(units.map((u) => [u.key, u]));
 
-  // Escalation rules (v12.5 §6.2.2):
-  // - score margin: (s[0] - s[1]) / s[0] < 0.15 → escalate
-  // - evidence-count: len(top.evidence_topics) < 2 in context_retrieval → escalate
-  // - flags: full_context / exact_wording → escalate
-  let escalate = false;
-  if (flags.includes('full_context') || flags.includes('exact_wording')) {
-    escalate = true;
-  } else if (authed.length >= 2) {
-    const margin = (authed[0].score - authed[1].score) / authed[0].score;
-    if (margin < 0.15) escalate = true;
-  }
-  if (authed[0] && authed[0].evidence_topics.length < 2) {
-    // M1: evidence_topics is always [slug] (single-topic cards). So this fires often.
-    // M2 will add multi-topic synthesis cards.
-    escalate = true;
+  // Lexical arm (always). Semantic arm intersected with the ACL/scope-filtered set.
+  const L = lexicalRank(units, normalizeQuery(query));
+  const sRanked = (semantic?.ranked ?? []).filter((k) => unitByKey.has(k));
+  const sScores = semantic?.scores ?? new Map();
+  const fused = sRanked.length ? rrf({ L, S: sRanked }) : rrf({ L });
+
+  const escalate = flags.includes('full_context') || flags.includes('exact_wording');
+
+  // best curated fused-rank, for the "lower tier outranks curated" display marker.
+  let bestCuratedRank = Infinity;
+  for (let i = 0; i < fused.length; i++) {
+    const u = unitByKey.get(fused[i].key);
+    if (u && u.tier === 'curated') { bestCuratedRank = i + 1; break; }
   }
 
-  const results = authed.slice(0, limit).map((hit) => ({
-    slug: hit.slug,
-    score: hit.score,
-    last_updated_seq: hit.last_updated_seq,
-    tags: [...(hit.tags ? hit.tags.split(' ').filter(Boolean) : [])],
-    preview: hit.content_preview,
-    content: escalate ? contentFor(state, hit.slug) : undefined,
-  }));
+  const results = fused.slice(0, limit).map((f, i) => {
+    const u = unitByKey.get(f.key);
+    const fusedRank = i + 1;
+    return stampRetrievalOrigin({
+      slug: u.slug, seq: u.seq, chunk_index: u.chunk_index, tier: u.tier,
+      score: f.score,
+      fused_rank: fusedRank,
+      lexical_rank: f.ranks.L ?? null,
+      semantic_rank: f.ranks.S ?? null,
+      similarity: sScores.has(f.key) ? sScores.get(f.key) : null,
+      snippet: u.content.slice(0, 240),
+      content: escalate ? u.content : undefined,
+      tier_outranks_curated: u.tier !== 'curated' && fusedRank < bestCuratedRank,
+    }, digest);
+  });
 
-  return {
-    mode: 'context_retrieval',
+  const grouped = {};
+  for (const t of TIER_ORDER) grouped[t] = [];
+  for (const r of results) (grouped[r.tier] ?? (grouped[r.tier] = [])).push(r);
+
+  const provenance = buildProvenance({
+    retriever, modelConfig: modelCfg, corpus, principal,
+    retrievalConfig: {
+      rrf_k: RRF_K, n_pre: N_PRE, similarity_floor: SIMILARITY_FLOOR,
+      tier_order: TIER_ORDER, bounded_prior_cap: BOUNDED_PRIOR_CAP,
+      chunker_version: CHUNKER_VERSION, chunk_size: CHUNK_SIZE, chunk_overlap: CHUNK_OVERLAP,
+    },
     query,
+    perResult: results.map((r) => ({
+      key: `${r.slug}::${r.seq}::${r.chunk_index}`,
+      lexical_rank: r.lexical_rank, semantic_rank: r.semantic_rank,
+      fused_rank: r.fused_rank, tier: r.tier,
+    })),
+    matched: results.map((r) => {
+      const u = unitByKey.get(`${r.slug}::${r.seq}::${r.chunk_index}`);
+      return { slug: r.slug, seq: r.seq, chunk_index: r.chunk_index, tier: r.tier, span: u?.span ?? null };
+    }),
+  });
+
+  return stampRetrievalOrigin({
+    mode: 'context_retrieval',
+    query, scope,
     results,
+    grouped_by_tier: grouped,
+    fused_rank: results.map((r) => `${r.slug}::${r.seq}::${r.chunk_index}`),
+    authoritative_tiers: AUTHORITATIVE_TIERS,
+    advisory_tiers: ADVISORY_TIERS,
+    must_not_write_from_tiers: MUST_NOT_WRITE_FROM_TIERS,
+    semantic_status,
+    cache_status,
+    bounded_prior_cap: BOUNDED_PRIOR_CAP,
     escalated: escalate,
-  };
+    provenance,
+  }, digest);
+}
+
+/**
+ * context_retrieval (SYNC) — the lexical entry. Used by retrieve() and all legacy
+ * callers. The semantic arm is never run here (it is async); when the triple gate
+ * is open this returns keyword-only with semantic_status='disabled'. For the
+ * hybrid path use contextRetrievalHybrid().
+ */
+function contextRetrieval(state, query, principal, flags, limit, opts = {}) {
+  const { scope = 'curated', siloDir, env = process.env } = opts;
+  const enabled = semanticEnabled({ siloDir, env });
+  return assembleContext({
+    state, query, principal, flags, limit, scope,
+    enabled,
+    occMap: null, cache: null, semantic: null,
+    semantic_status: enabled ? 'unavailable' : 'disabled',
+    cache_status: 'missing',
+    modelCfg: null,
+    corpus: {
+      log_head_seq: state.last_seq ?? null,
+      log_head_hash: state.tail_hash ?? null,
+      cache_manifest_digest: null,
+    },
+    retriever: 'lexical',
+  });
+}
+
+/**
+ * context_retrieval (ASYNC) — hybrid when the triple gate is open. Loads the cache
+ * + embedder, runs both arms, fuses. The ENTIRE semantic block is wrapped so any
+ * error degrades to lexical with semantic_status='degraded' (§4.8). When the gate
+ * is closed it delegates to the sync lexical path.
+ */
+export async function contextRetrievalHybrid({
+  state, query, principal, flags = [], limit = 10, scope = 'curated',
+  siloDir, env = process.env, embedder, cache,
+}) {
+  if (!state) throw new Error('state required');
+  if (!principal) throw new Error('principal required');
+
+  const enabled = semanticEnabled({ siloDir, env });
+  if (!enabled) {
+    return contextRetrieval(state, query, principal, flags, limit, { scope, siloDir, env });
+  }
+
+  // Model config comes from the actual embedder when one is injected (tests +
+  // correctness — the cache identity must match the model that built it);
+  // otherwise resolve from the install marker.
+  const modelKey = resolveModelKey({ siloDir, env });
+  const modelCfg = embedder?.config ?? (modelKey ? resolveModelConfig(modelKey, { siloDir }) : null);
+
+  try {
+    const theCache = cache ?? (await loadCache(siloDir));
+    const occMap = buildOccMap(theCache);
+    const liveUnits = liveSearchUnits(state, occMap);
+    const cache_status = deriveCacheStatus({ cache: theCache, liveUnits, state, modelConfig: modelCfg });
+
+    const emb = embedder ?? (await getEmbedder({ siloDir, env }));
+    let semantic = { ranked: [], scores: new Map() };
+    let semantic_status = 'ready';
+    if (!emb) {
+      semantic_status = 'unavailable';
+    } else if (cache_status === 'missing' || cache_status === 'stale') {
+      // Embedder present but the store is unusable → semantic arm contributes
+      // nothing; search degrades to lexical until regenerate runs (§4.12).
+      semantic_status = 'ready';
+    } else {
+      const scopedUnits = liveUnits.filter((u) => tierInScope(u.tier, scope));
+      semantic = await semanticRank(scopedUnits, query, theCache, emb);
+    }
+
+    return assembleContext({
+      state, query, principal, flags, limit, scope,
+      enabled, occMap, cache: theCache, semantic, semantic_status, cache_status, modelCfg,
+      corpus: {
+        log_head_seq: state.last_seq ?? null,
+        log_head_hash: state.tail_hash ?? null,
+        cache_manifest_digest: theCache?.manifest?.identity_digest ?? null,
+      },
+      retriever: semantic.ranked.length ? 'hybrid' : 'lexical',
+    });
+  } catch (err) {
+    // §4.8 — the whole semantic block failed; fall back to lexical, mark degraded.
+    const lex = contextRetrieval(state, query, principal, flags, limit, { scope, siloDir, env });
+    lex.semantic_status = 'degraded';
+    return lex;
+  }
 }
 
 function contentFor(state, slug) {
