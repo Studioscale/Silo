@@ -4,9 +4,13 @@ All notable changes to Silo. Format loosely based on [Keep a Changelog](https://
 
 ## [Unreleased]
 
-### Added — local hybrid (lexical ⊕ semantic) search (target v0.3.0)
+## [0.3.0] — 2026-06-30
+
+### Added — local hybrid (lexical ⊕ semantic) search
 
 Optional, strictly opt-in local semantic search fused with the keyword engine via Reciprocal Rank Fusion, with **chunk-level trust tiering** and a **default `scope=curated`**. Off by default — the one universal change is **#17** (below). Search stays **read-only** and is **provably fed into no write** (a tested call-graph invariant). Ratified design: [`proposals/hybrid-search.md`](proposals/hybrid-search.md). Built in the build-brief's order (foundation+cache → no-write guard → lexical-per-unit+RRF+tiering → install+gates+doctor → eval), each step tested and green.
+
+**Measured (LongMemEval, real bge-small-en model, recall_all@5):** full `_S` (479 q) — lexical **75.6%** → hybrid **87.7%** (**+12.1 pts**). Fusion is RRF with the lexical arm down-weighted (w_L=0.5, tuned off-prod on a flat plateau) so hybrid ≥ semantic-alone while keeping exact-term (part-number) matches that the lexical arm nails. Ships `scope=curated` by default; promoting `scope=all` stays gated on the §5 pre-registered bar (a separate, logged decision).
 
 - **#17 (universal, standalone): retired CURATED bullets no longer surface in keyword search** — excluded from `buildIndex`'s per-topic content, the per-unit lexical index, and escalated `contentFor` output. Retired = removed; reachable only via the audit log. (`test/retired-exclusion-17.test.js`.)
 - **Embedder primitive** (`src/embedding/embedder.js`) — triple-gate loader (`semanticEnabled()` = `silo semantic install` marker + `SILO_SEMANTIC=on` + explicit model), pinned model registry (`multilingual-e5-small` / `bge-small-en-v1.5`, 384-dim q8, prefix profiles), fs-ext-style degrade-on-missing. Embedding deps are **not** in `package.json`.
