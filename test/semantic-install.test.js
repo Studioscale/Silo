@@ -27,10 +27,45 @@ async function freshDir(p = 'silo-sem-') {
   return fs.mkdtemp(join(tmpdir(), p));
 }
 
+test('install: ships on @huggingface/transformers v3 (package decision)', () => {
+  // We migrated off the frozen @xenova/transformers v2 to the maintained v3.
+  assert.ok(DEP_PINS['@huggingface/transformers'], 'pins @huggingface/transformers');
+  assert.ok(!DEP_PINS['@xenova/transformers'], 'no longer pins the frozen v2');
+  assert.match(DEP_PINS['@huggingface/transformers'], /^3\./, 'pinned to a v3 release');
+});
+
 test('installSemantic: requires an explicit model (no silent default)', async () => {
   const dir = await freshDir();
   await assert.rejects(installSemantic({ siloDir: dir, skipDeps: true }), /choose a model explicitly/);
   await assert.rejects(installSemantic({ siloDir: dir, model: 'nope', skipDeps: true }), /choose a model explicitly/);
+});
+
+test('installSemantic: a SUCCESSFUL dep install reports installed:true + deps_status', async () => {
+  const dir = await freshDir();
+  let calledWith = null;
+  const res = await installSemantic({
+    siloDir: dir, model: 'bge-small-en-v1.5', nowIso: 't',
+    runInstall: (pkgs) => { calledWith = pkgs; return 'installed'; }, // inject a successful install
+  });
+  assert.equal(res.installed, true);
+  assert.equal(res.deps_status, 'installed');
+  // the pinned package@version is what gets installed
+  assert.ok(calledWith.some((p) => p.startsWith('@huggingface/transformers@3.')));
+  assert.equal(readInstallRecord(dir).deps_status, 'installed');
+});
+
+test('installSemantic: a FAILED dep install reports installed:false but still records the marker', async () => {
+  const dir = await freshDir();
+  const res = await installSemantic({
+    siloDir: dir, model: 'bge-small-en-v1.5', nowIso: 't',
+    runInstall: () => 'failed(EINVAL)', // simulate the Windows .cmd spawn failure
+  });
+  assert.equal(res.installed, false);
+  assert.equal(res.deps_status, 'failed(EINVAL)');
+  // marker IS written (so `silo doctor` can guide recovery), recording the choice
+  const rec = readInstallRecord(dir);
+  assert.equal(rec.model, 'bge-small-en-v1.5');
+  assert.equal(rec.deps_status, 'failed(EINVAL)');
 });
 
 test('installSemantic: writes the marker; the triple gate then opens with SILO_SEMANTIC=on', async () => {

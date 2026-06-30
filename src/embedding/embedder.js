@@ -18,7 +18,8 @@
  * gate is open the cache projection + semantic arm are a zero-cost no-op.
  *
  * Degrade-on-missing (copied from log/file-lock.js:29-43, NOT the auto-install
- * half): the native lib (`@xenova/transformers`) loads via dynamic import inside
+ * half): the native lib (`@huggingface/transformers`, the maintained v3 of the
+ * former `@xenova/transformers`) loads via dynamic import inside
  * try/catch; on failure `getEmbedder()` resolves null and `hasEmbedderSupport()`
  * reports false, so logic tests run with no native dep and search degrades to
  * lexical (§4.8).
@@ -76,7 +77,7 @@ async function tryLoadTransformers() {
   if (triedTransformers) return transformersMod;
   triedTransformers = true;
   try {
-    transformersMod = await import('@xenova/transformers');
+    transformersMod = await import('@huggingface/transformers');
   } catch (err) {
     transformersUnavailableReason = err?.message || String(err);
     transformersMod = null;
@@ -208,8 +209,10 @@ export async function getEmbedder({ siloDir, env = process.env, install } = {}) 
 
   const cfg = modelConfig(modelKey, { siloDir, install });
   try {
+    // @huggingface/transformers v3 takes `dtype` (e.g. 'q8'); the v2 `quantized`
+    // boolean is gone. cfg.dtype is pinned to 'q8' in the registry (§4.2).
     const pipe = await mod.pipeline('feature-extraction', cfg.transformers_id, {
-      quantized: cfg.dtype === 'q8',
+      dtype: cfg.dtype,
     });
     embedderSingleton = {
       modelKey,

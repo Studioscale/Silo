@@ -1480,7 +1480,16 @@ async function cmdSemantic(values, positionals) {
     }
     console.log(JSON.stringify(result, null, 2));
     console.log('');
-    console.log('Semantic install recorded. To enable hybrid search:');
+    if (!result.installed) {
+      // Marker is written (so `silo doctor` can guide), but the deps did not land.
+      console.error(`silo semantic install: dependency install FAILED (${result.deps_status}).`);
+      console.error(`  The model choice was recorded, but ${Object.keys(result.dep_pins).join(', ')} is not installed`);
+      console.error('  — hybrid search will report semantic_status=unavailable until it is.');
+      console.error('  Retry, or install manually:');
+      console.error(`    npm install ${Object.entries(result.dep_pins).map(([n, v]) => `${n}@${v}`).join(' ')}`);
+      process.exit(1);
+    }
+    console.log('Semantic install complete. To enable hybrid search:');
     console.log('  export SILO_SEMANTIC=on');
     console.log('  silo regenerate --to <target>   # builds the embedding cache');
   } catch (err) {
