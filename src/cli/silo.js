@@ -33,7 +33,9 @@ import { v7 as uuidv7 } from 'uuid';
 import { LogWriter } from '../log/append.js';
 import { interpret } from '../interpret/index.js';
 import { stateToJson } from '../interpret/state.js';
-import { retrieve } from '../retrieval/index.js';
+import { retrieve, contextRetrievalHybrid } from '../retrieval/index.js';
+import { installSemantic } from '../embedding/install.js';
+import { describeSemanticStatus } from '../embedding/semantic-status.js';
 import { loadMatrix } from '../matrix/load.js';
 import { importDirectory } from '../import-jarvis/index.js';
 import { regenerateProjections } from '../projection/index.js';
@@ -256,6 +258,7 @@ async function cmdSearch({
   principal,
   limit,
   n,
+  scope,
 }) {
   // Normalize CLI alias: --mode=orient → orientation_view
   const normalizedMode =
@@ -271,15 +274,27 @@ async function cmdSearch({
 
   const writer = await openWriter(siloDir);
   const state = await interpret(writer);
-  const result = retrieve({
-    state,
-    query: query || '',
-    mode: normalizedMode,
-    principal,
-    flags: flags ? flags.split(',').map((s) => s.trim()).filter(Boolean) : [],
-    limit: limit ? Number.parseInt(limit, 10) : 10,
-    n: n ? Number.parseInt(n, 10) : undefined,
-  });
+  const flagList = flags ? flags.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  const lim = limit ? Number.parseInt(limit, 10) : 10;
+  // Default scope=curated (hybrid-search §4.3); scope=all is explicit opt-in.
+  const searchScope = scope === 'all' ? 'all' : 'curated';
+
+  // context_retrieval routes through the async hybrid entry so the semantic arm
+  // engages when the triple gate is open; otherwise it degrades to lexical.
+  const result = normalizedMode === 'context_retrieval'
+    ? await contextRetrievalHybrid({
+        state, query: query || '', principal, flags: flagList, limit: lim,
+        scope: searchScope, siloDir,
+      })
+    : retrieve({
+        state,
+        query: query || '',
+        mode: normalizedMode,
+        principal,
+        flags: flagList,
+        limit: lim,
+        n: n ? Number.parseInt(n, 10) : undefined,
+      });
   console.log(JSON.stringify(result, null, 2));
 }
 
@@ -1338,6 +1353,31 @@ async function cmdDoctor(values) {
     console.log('');
   }
 
+  // Semantic search status (hybrid-search §6). Honest triple-gate + cache health.
+  try {
+    const sem = await describeSemanticStatus({ siloDir });
+    console.log(`Semantic search: ${sem.enabled ? 'enabled' : 'disabled'}`);
+    console.log(`  Model: ${sem.model ?? '(none chosen — run `silo semantic install --model=<key>`)'}`);
+    console.log(`  Flag SILO_SEMANTIC=on: ${sem.flag_on ? 'yes' : 'no'}`);
+    console.log(`  Installed: ${sem.installed ? `yes (${formatTs(sem.installed_at)})` : 'no'}`);
+    console.log(`  Native dep loadable: ${sem.dep_support ? 'yes' : 'no'}`);
+    if (sem.cache.status === 'missing') {
+      console.log('  Embedding cache: none yet (run `silo regenerate` with semantic enabled).');
+    } else {
+      const c = sem.cache;
+      const perTier = Object.entries(c.per_tier).map(([t, n]) => `${t}:${n}`).join(' ');
+      console.log(`  Embedding cache: ${c.status} — ${c.vectors} vectors / ${c.chunks} chunks, ${(c.bytes / 1024).toFixed(1)} KB`);
+      console.log(`    Per-tier chunks: ${perTier}`);
+      if (c.identity_matches === false) {
+        console.log('    ⚠ Cache model/config differs from the chosen model — `silo regenerate` to rebuild.');
+      }
+    }
+    console.log('');
+  } catch (err) {
+    console.log(`Semantic search: status unavailable (${err.message})`);
+    console.log('');
+  }
+
   // Cache file diagnostics.
   console.log(`Cache file: ${join(siloDir, UPDATE_CACHE_FILENAME)}`);
   console.log(`  Exists: ${cache ? 'yes' : 'no'}`);
@@ -1417,6 +1457,50 @@ async function cmdRegenerate({ 'silo-dir': siloDir, to, strict }) {
   console.log(JSON.stringify(result, null, 2));
 }
 
+// ── `silo semantic install` (hybrid-search §4.1/§4.2) ──────────────────────
+async function cmdSemantic(values, positionals) {
+  const sub = positionals[0];
+  const siloDir = values['silo-dir'];
+  if (sub !== 'install') {
+    console.error('silo semantic: usage — `silo semantic install --model=<key>`');
+    console.error('  Models: multilingual-e5-small (384d, ~100 langs) | bge-small-en-v1.5 (384d, EN)');
+    console.error('  Then set SILO_SEMANTIC=on to enable hybrid search.');
+    process.exit(2);
+  }
+  try {
+    const result = await installSemantic({
+      siloDir,
+      model: values.model,
+      skipDeps: !!values['skip-deps'],
+      dryRun: !!values['dry-run'],
+    });
+    if (result.dry_run) {
+      console.log(JSON.stringify({ plan: result }, null, 2));
+      return;
+    }
+    console.log(JSON.stringify(result, null, 2));
+    console.log('');
+    if (!result.installed) {
+      // Marker is written (so `silo doctor` can guide), but the deps did not land.
+      console.error(`silo semantic install: dependency install FAILED (${result.deps_status}).`);
+      console.error(`  The model choice was recorded, but ${Object.keys(result.dep_pins).join(', ')} is not installed`);
+      console.error('  — hybrid search will report semantic_status=unavailable until it is.');
+      console.error('  Retry, or install manually:');
+      console.error(`    npm install ${Object.entries(result.dep_pins).map(([n, v]) => `${n}@${v}`).join(' ')}`);
+      process.exit(1);
+    }
+    console.log('Semantic install complete. To enable hybrid search:');
+    console.log('  export SILO_SEMANTIC=on');
+    console.log('  silo regenerate --to <target>   # builds the embedding cache');
+  } catch (err) {
+    if (err.code === 'MODEL_REQUIRED') {
+      console.error(err.message);
+      process.exit(2);
+    }
+    throw err;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main dispatcher
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1460,6 +1544,8 @@ async function main() {
     flags: { type: 'string' },
     limit: { type: 'string' },
     n: { type: 'string' },
+    scope: { type: 'string' }, // search: 'curated' (default) | 'all'
+    'skip-deps': { type: 'boolean', default: false }, // semantic install: write marker only
     from: { type: 'string' },
     to: { type: 'string' },
     'from-session': { type: 'string' },
@@ -1564,6 +1650,9 @@ async function main() {
         break;
       case 'curate-status':
         await cmdCurateStatus(values);
+        break;
+      case 'semantic':
+        await cmdSemantic(values, positionals);
         break;
       default:
         console.error(`silo: unknown command "${command}"`);

@@ -22,7 +22,7 @@ Silo replaces flat memory files (like OpenClaw's `MEMORY.md` or Claude Code's bu
               └─────────────────────────────┘
                             │ index
                             ▼
-                   BM25 + vector search
+                   BM25 / lexical search
                          (Zone C)
 ```
 
@@ -65,9 +65,49 @@ Most AI memory systems work like this:
 5. BM25 keyword search (free, local)
 6. Ask the user (free, last resort)
 
-Search is lexical only (BM25 / MiniSearch, with query normalization). There is
-no semantic / vector retrieval today; it would help most on large histories and
-multi-evidence questions (see `eval/longmemeval/`).
+Search defaults to lexical (BM25 / MiniSearch, with query normalization). An
+**optional, opt-in local semantic layer** (step 5) can be fused in — see
+[Semantic search](#semantic-search-optional-opt-in). It helps most on large
+histories and multi-evidence questions (measured in `eval/longmemeval/`).
+
+## Semantic search (optional, opt-in)
+
+Off by default. When enabled, Silo adds a **local** dense-retrieval arm and fuses
+it with the keyword engine (Reciprocal Rank Fusion), so paraphrases and
+multi-evidence questions that keyword search misses still surface. It is **local**
+(no API, no data leaves the box), **read-only**, and **provably fed into no write**
+(a tested call-graph invariant — search results can never be mechanically consumed
+by a write/curate/distill path).
+
+**Strictly opt-in — three gates, all required:**
+
+1. **Install it.** `silo semantic install --model=<key>` — pick a model explicitly
+   (no silent default). Pins the embedding dep and records the choice. The
+   embedding dependency is **not** in `package.json`; this is how it arrives.
+   - `bge-small-en-v1.5` — English, 384-dim, ~234 MB RAM.
+   - `multilingual-e5-small` — ~100 languages, 384-dim, ~606 MB RAM.
+2. **Flag it on.** `export SILO_SEMANTIC=on`.
+3. **Build the cache.** `silo regenerate --to <target>` embeds the corpus into a
+   local cache projection (`<silo-dir>/projections/embeddings.json`). Search reads
+   it; it is never written at search time.
+
+Then `silo search "<query>"` fuses both arms. `silo doctor` reports the gate
+state, model, and cache health. Disabled or not-yet-installed → keyword-only, as
+before (the envelope says `semantic_status: disabled`).
+
+**Trust tiers + `scope`.** Results are tiered by trust at the chunk level —
+`curated` (the authoritative tier) > `note` (short event-log writes) > `source`
+(raw imported material). **Default `scope=curated`** returns only the
+authoritative tier; `scope=all` adds the advisory tiers, clearly isolated, for
+recall (`silo search … --scope=all`). Retired bullets never surface (see
+[#17](CHANGELOG.md)). The consumer contract: advisory tiers are unverified — do
+not write from them without citing the source, and prefer the curated tier.
+
+**Engine.** `@huggingface/transformers` (v3) running ONNX locally; q8, mean-pooled,
+L2-normalized 384-dim vectors. Embeddings never enter the operation log or the
+canonical hash, so **log-replay determinism is preserved**. Promotion of
+`scope=all` to the default is gated on a pre-registered eval bar (`eval/`) — a
+separate, logged decision.
 
 ## Numbers
 

@@ -16,6 +16,8 @@ import { regenerateAllTopicFiles } from './regenerate-topic-file.js';
 import { regenerateTopicIndex } from './regenerate-topic-index.js';
 import { regenerateAllEventLogs } from './regenerate-event-log.js';
 import { buildPendingSuggestionsEnvelope } from './regenerate-pending-suggestions.js';
+import { buildEmbeddingCache } from './embed-cache.js';
+import { semanticEnabled } from '../embedding/embedder.js';
 
 /**
  * Atomic + durable write — write to a unique tmp path, fsync, rename.
@@ -54,9 +56,15 @@ async function atomicWrite(path, content) {
  * @param {LogWriter} args.logReader - Silo log
  * @param {Object} args.state - interpret() output
  * @param {string} args.targetDir - e.g., '/root/clawd-v3' on the VPS
+ * @param {string} [args.siloDir] - .silo data dir for the embedding cache
+ *                 projection (defaults to logReader.siloDir). The semantic cache
+ *                 lives under <siloDir>/projections/, NOT targetDir.
+ * @param {Object} [args.embedder] - inject an embedder (tests); else resolved
+ *                 from the triple gate when semanticEnabled().
+ * @param {Object} [args.env]
  * @returns {Promise<{topics: number, event_logs: number, target: string}>}
  */
-export async function regenerateProjections({ logReader, state, targetDir }) {
+export async function regenerateProjections({ logReader, state, targetDir, siloDir, embedder, env = process.env }) {
   // 1. Topic files
   const topicFiles = await regenerateAllTopicFiles({ logReader, state });
   for (const [slug, text] of topicFiles) {
@@ -82,11 +90,29 @@ export async function regenerateProjections({ logReader, state, targetDir }) {
     JSON.stringify(envelope, null, 2) + '\n',
   );
 
+  // 5. Embedding cache projection (hybrid-search §4.4). Gated by the triple
+  //    gate — zero cost on disabled installs. Best-effort: a cache failure is
+  //    reported but never fails the (authoritative) projection. The cache lives
+  //    under <siloDir>/projections/, not targetDir; search degrades to lexical
+  //    until it is present.
+  const cacheSiloDir = siloDir ?? logReader?.siloDir ?? null;
+  let embeddingCache = { skipped: true, reason: 'no_silo_dir' };
+  if (cacheSiloDir && (embedder || semanticEnabled({ siloDir: cacheSiloDir, env }))) {
+    try {
+      embeddingCache = await buildEmbeddingCache({
+        logReader, state, siloDir: cacheSiloDir, embedder, env,
+      });
+    } catch (err) {
+      embeddingCache = { skipped: true, reason: 'error', error: err?.message || String(err) };
+    }
+  }
+
   return {
     topics: topicFiles.size,
     event_logs: eventLogs.size,
     pending_suggestions: envelope.count,
     target: targetDir,
+    embedding_cache: embeddingCache,
   };
 }
 
@@ -95,3 +121,4 @@ export { regenerateTopicFile, regenerateAllTopicFiles } from './regenerate-topic
 export { regenerateTopicIndex } from './regenerate-topic-index.js';
 export { regenerateEventLogForDate, regenerateAllEventLogs } from './regenerate-event-log.js';
 export { buildPendingSuggestionsEnvelope } from './regenerate-pending-suggestions.js';
+export { buildEmbeddingCache, loadCacheFile, cachePath, enumerateCorpusUnits } from './embed-cache.js';
