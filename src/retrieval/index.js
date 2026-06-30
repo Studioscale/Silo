@@ -17,7 +17,7 @@ import {
   liveSearchUnits, lexicalRank, semanticRank, loadCache, buildOccMap,
   deriveCacheStatus, N_PRE, SIMILARITY_FLOOR, BOUNDED_PRIOR_CAP,
 } from './semantic.js';
-import { rrf, RRF_K } from './fusion.js';
+import { rrf, RRF_K, DEFAULT_ARM_WEIGHTS, LEXICAL_FUSION_WEIGHT } from './fusion.js';
 import {
   tierInScope, TIER_ORDER, AUTHORITATIVE_TIERS, ADVISORY_TIERS, MUST_NOT_WRITE_FROM_TIERS,
 } from './tiers.js';
@@ -211,7 +211,12 @@ function assembleContext({
   const L = lexicalRank(units, normalizeQuery(query));
   const sRanked = (semantic?.ranked ?? []).filter((k) => unitByKey.has(k));
   const sScores = semantic?.scores ?? new Map();
-  const fused = sRanked.length ? rrf({ L, S: sRanked }) : rrf({ L });
+  // Down-weight the lexical arm (DEFAULT_ARM_WEIGHTS, tuned off-prod) so it
+  // refines rather than competes with the semantic arm. Harmless when only L is
+  // present (a constant scale doesn't change single-arm order).
+  const fused = sRanked.length
+    ? rrf({ L, S: sRanked }, { weights: DEFAULT_ARM_WEIGHTS })
+    : rrf({ L });
 
   const escalate = flags.includes('full_context') || flags.includes('exact_wording');
 
@@ -246,6 +251,7 @@ function assembleContext({
     retriever, modelConfig: modelCfg, corpus, principal,
     retrievalConfig: {
       rrf_k: RRF_K, n_pre: N_PRE, similarity_floor: SIMILARITY_FLOOR,
+      lexical_weight: LEXICAL_FUSION_WEIGHT, semantic_weight: 1,
       tier_order: TIER_ORDER, bounded_prior_cap: BOUNDED_PRIOR_CAP,
       chunker_version: CHUNKER_VERSION, chunk_size: CHUNK_SIZE, chunk_overlap: CHUNK_OVERLAP,
     },

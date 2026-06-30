@@ -14,20 +14,42 @@
 export const RRF_K = 60;
 
 /**
- * Fuse one or more ranked arms.
+ * Lexical-arm fusion weight (the semantic arm is 1.0). Tuned off-prod on
+ * LongMemEval (resumable harness, re-fused offline from stored per-arm rankings):
+ * at full weight (1.0) the lexical arm added enough RRF noise that hybrid sat
+ * just BELOW semantic-alone; down-weighting it lands on a wide, flat plateau
+ * (w_L ∈ [0.15, 0.8] all gave the same recall_all@5) where hybrid BEATS both
+ * semantic-alone and the equal-weight hybrid. 0.5 is the conservative midpoint of
+ * that plateau — the lexical arm still contributes at HALF weight (not zeroed), so
+ * exact-term matches (part numbers, names — which LongMemEval doesn't probe but
+ * real Silo queries hit) keep their pull; see test/hybrid-search.test.js exact-term
+ * cases. A small, deliberate down-weight, not a benchmark over-fit.
+ */
+export const LEXICAL_FUSION_WEIGHT = 0.5;
+
+/** Default per-arm weights for the product ranker (lexical down-weighted). */
+export const DEFAULT_ARM_WEIGHTS = { L: LEXICAL_FUSION_WEIGHT, S: 1 };
+
+/**
+ * Fuse one or more ranked arms with optional per-arm weights.
+ *
+ *   score(u) = Σ_{arm where u present} w_arm / (k + rank_arm(u))
  *
  * @param {Object<string, string[]>} arms - e.g. { L: [key,...], S: [key,...] }
  *        each a list of unit keys in rank order (index 0 = rank 1).
  * @param {Object} [opts]
  * @param {number} [opts.k=RRF_K]
+ * @param {Object<string, number>} [opts.weights] - per-arm weight; missing → 1.
+ *        Omit entirely to fuse with equal weights (standard RRF).
  * @returns {Array<{ key:string, score:number, ranks:Object<string,number> }>}
  *          sorted by fused score desc, key asc as tiebreak.
  */
-export function rrf(arms, { k = RRF_K } = {}) {
+export function rrf(arms, { k = RRF_K, weights } = {}) {
   const acc = new Map(); // key -> { key, score, ranks }
   for (const armName of Object.keys(arms)) {
     const list = arms[armName];
     if (!Array.isArray(list)) continue;
+    const w = weights && weights[armName] != null ? weights[armName] : 1;
     for (let i = 0; i < list.length; i++) {
       const key = list[i];
       const rank = i + 1; // 1-based
@@ -36,7 +58,7 @@ export function rrf(arms, { k = RRF_K } = {}) {
         cur = { key, score: 0, ranks: {} };
         acc.set(key, cur);
       }
-      cur.score += 1 / (k + rank);
+      cur.score += w / (k + rank);
       cur.ranks[armName] = rank;
     }
   }

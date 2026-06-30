@@ -59,7 +59,9 @@ async function seal(writer, slug, readers) {
 }
 
 // Build a corpus + its embedding cache; return state ready for hybrid search.
-async function corpus(writes, { seals = [] } = {}) {
+// The cache MUST be built with the same embedder used at search time (identity
+// match) — pass `embedder` to control the semantic vectors in a test.
+async function corpus(writes, { seals = [], embedder = mock() } = {}) {
   const { dir, writer } = await fresh();
   await declare(writer, 'helder');
   await declare(writer, 'alice');
@@ -68,7 +70,7 @@ async function corpus(writes, { seals = [] } = {}) {
   for (const [slug, tag, content] of writes) await write(writer, slug, tag, content);
   for (const [slug, readers] of seals) await seal(writer, slug, readers);
   let state = await interpret(writer);
-  await buildEmbeddingCache({ logReader: writer, state, siloDir: dir, embedder: mock(), nowIso: '2026-04-01T12:00:00Z' });
+  await buildEmbeddingCache({ logReader: writer, state, siloDir: dir, embedder, nowIso: '2026-04-01T12:00:00Z' });
   return { dir, writer, state };
 }
 
@@ -100,6 +102,42 @@ test('hybrid: semantic arm surfaces a unit lexical misses; snippet + ranks prese
   assert.equal(hit.semantic_rank, 1);     // semantic found it
   assert.ok(hit.similarity >= 0.99);
   assert.ok(hit.snippet.includes('apple'));
+});
+
+// ── exact-term value preserved despite the lexical down-weight (w_L=0.5) ──────
+// The fusion down-weights lexical to cut RRF noise on paraphrase queries; these
+// confirm exact identifiers (part numbers etc. — which LongMemEval never probes)
+// still land at the top, in the two realistic cases.
+
+test('exact-term: semantic AGREES → exact-id doc wins #1 (both arms contribute)', async () => {
+  // query token "xk9920" is an exact identifier; the model also encodes it (agrees).
+  const ev = makeMockEmbedder({ dims: 3, vectorFor: (t) =>
+    t.includes('xk9920') ? [0, 0, 1] : t.includes('apple') ? [1, 0, 0] : [0.01, 0.01, 0.01] });
+  const ctx = await corpus([
+    ['parts', 'CURATED', 'gasket part number xk9920 in stock'],
+    ['decoy', 'CURATED', 'apple banana orange harvest'],
+  ], { embedder: ev });
+  const r = await search(ctx, 'xk9920', { scope: 'curated', embedder: ev });
+  assert.equal(r.results[0].slug, 'parts', 'exact-id doc ranks first');
+  assert.equal(r.results[0].lexical_rank, 1, 'lexical arm matched the exact term');
+  assert.equal(r.results[0].semantic_rank, 1, 'semantic agreed');
+});
+
+test('exact-term: semantic BLIND (below floor) → lexical arm carries the exact id', async () => {
+  // The model has no confident neighbour for the identifier (similarity_floor cuts
+  // it), so the lexical arm alone must surface it — and does.
+  const ev = makeMockEmbedder({ dims: 3, vectorFor: (t) =>
+    t.includes('serial') ? [1, 0, 0]            // the exact-id DOC (orthogonal to query → cosine 0)
+      : t.includes('qz7788') ? [0, 1, 0]        // the QUERY (only it lacks "serial")
+      : [0, 0, 1] });                            // decoy (also orthogonal to query)
+  const ctx = await corpus([
+    ['parts', 'CURATED', 'widget serial qz7788 shipped monday'],
+    ['decoy', 'CURATED', 'unrelated meeting notes here'],
+  ], { embedder: ev });
+  const r = await search(ctx, 'qz7788', { scope: 'curated', embedder: ev });
+  assert.equal(r.results[0].slug, 'parts', 'exact-id doc surfaces via lexical alone');
+  assert.equal(r.results[0].lexical_rank, 1);
+  assert.equal(r.results[0].semantic_rank, null, 'semantic found nothing above the floor');
 });
 
 // ── scope=curated excludes non-curated from BOTH arms ────────────────────────

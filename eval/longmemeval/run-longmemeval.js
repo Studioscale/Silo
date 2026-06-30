@@ -28,7 +28,7 @@ import { createReadStream, writeFileSync, appendFileSync, readFileSync, existsSy
 import { createHash } from 'node:crypto';
 import MiniSearch from 'minisearch';
 import { normalizeQuery } from '../../src/retrieval/index.js';
-import { rrf } from '../../src/retrieval/fusion.js';
+import { rrf, DEFAULT_ARM_WEIGHTS } from '../../src/retrieval/fusion.js';
 
 export const K_LIST = [1, 3, 5, 10];
 
@@ -143,7 +143,7 @@ export async function rankSemantic(question, sessionIds, sessions, { embedder, b
 export async function rankHybrid(question, sessionIds, sessions, opts) {
   const L = rankLexical(question, sessionIds, sessions, opts);
   const S = await rankSemantic(question, sessionIds, sessions, opts);
-  return rrf({ L, S }).map((r) => r.key);
+  return rrf({ L, S }, { weights: DEFAULT_ARM_WEIGHTS }).map((r) => r.key);
 }
 
 export async function rankFor(retriever, question, sessionIds, sessions, opts) {
@@ -305,7 +305,7 @@ async function main() {
         const gold = deriveGold(q);
         const L = rankLexical(q.question, q.haystack_session_ids, q.haystack_sessions, { queryMode });
         const S = await rankSemantic(q.question, q.haystack_session_ids, q.haystack_sessions, { embedder, batchSize });
-        const H = rrf({ L, S }).map((r) => r.key); // fuse FULL lists, then truncate
+        const H = rrf({ L, S }, { weights: DEFAULT_ARM_WEIGHTS }).map((r) => r.key); // fuse FULL lists (weighted), then truncate
         const rec = {
           qid: q.question_id, qtype: q.question_type || 'unknown', gold: [...gold],
           L: L.slice(0, 10), S: S.slice(0, 10), H: H.slice(0, 10),

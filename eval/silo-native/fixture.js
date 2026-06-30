@@ -69,6 +69,13 @@ export const fixture = {
       gold: [{ slug: 'welding', tier: 'curated' }], case: 'noisy-raw-vs-terse-curated',
     },
     {
+      // EXACT-TERM: an identifier the lexical arm matches verbatim — the value the
+      // lexical down-weight must NOT lose. Real Silo queries hit these (part #s,
+      // model codes); LongMemEval never probes them.
+      id: 'q-exact-wire', query: 'ER70S-6', principal: 'helder', scope: 'curated',
+      gold: [{ slug: 'welding', tier: 'curated' }], case: 'exact-term', exact_term: true,
+    },
+    {
       id: 'q-prazo', query: 'standard delivery deadline', principal: 'helder', scope: 'curated',
       gold: [{ slug: 'producao', tier: 'curated' }], case: 'pt-en',
     },

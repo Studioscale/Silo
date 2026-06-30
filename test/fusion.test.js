@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { rrf, RRF_K } from '../src/retrieval/fusion.js';
+import { rrf, RRF_K, LEXICAL_FUSION_WEIGHT, DEFAULT_ARM_WEIGHTS } from '../src/retrieval/fusion.js';
 
 test('rrf: k=60, 1-based — single arm score is 1/(60+rank)', () => {
   const out = rrf({ L: ['a', 'b'] });
@@ -40,4 +40,21 @@ test('rrf: deterministic tiebreak by key when scores equal', () => {
   const tie = rrf({ L: ['b'], S: ['a'] }); // both rank1 in distinct arms → equal score
   assert.equal(tie[0].key, 'a'); // 'a' < 'b'
   assert.ok(out); // sanity
+});
+
+test('rrf: per-arm weights scale each arm term (lexical down-weight)', () => {
+  // a only in L (rank1), b only in S (rank1). With w_L=0.5, w_S=1, b outscores a.
+  const out = rrf({ L: ['a'], S: ['b'] }, { weights: { L: 0.5, S: 1 } });
+  assert.equal(out[0].key, 'b');
+  assert.ok(Math.abs(out.find((r) => r.key === 'a').score - 0.5 / 61) < 1e-12);
+  assert.ok(Math.abs(out.find((r) => r.key === 'b').score - 1 / 61) < 1e-12);
+  // A unit in BOTH arms still accumulates both (weighted) terms — the lexical arm
+  // refines rather than being discarded.
+  const both = rrf({ L: ['x'], S: ['x'] }, { weights: { L: 0.5, S: 1 } });
+  assert.ok(Math.abs(both[0].score - (0.5 / 61 + 1 / 61)) < 1e-12);
+});
+
+test('rrf: tuned default — lexical weighted at half the semantic arm', () => {
+  assert.equal(LEXICAL_FUSION_WEIGHT, 0.5);
+  assert.deepEqual(DEFAULT_ARM_WEIGHTS, { L: 0.5, S: 1 });
 });
