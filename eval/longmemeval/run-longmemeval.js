@@ -102,12 +102,19 @@ function sessionUserText(session) {
     .join('\n');
 }
 
-// Cross-question embedding cache (eval only). LongMemEval haystacks resample a
-// shared session pool, so the same session text recurs across questions — caching
-// by text collapses ~240k _M embeds down to the pool size. Keyed by a content
-// hash; the vector is identical for identical text (deterministic per-item path).
+// Cross-question embedding cache (eval only), BOUNDED. Reuses identical session
+// text when it recurs; FIFO-evicted at VEC_CACHE_MAX so memory stays flat on a
+// constrained box (LongMemEval haystacks are largely DISJOINT across questions,
+// so an unbounded cache would just accumulate ~every session — it grew to 2.1 GB
+// and swapped a 3.7 GB co-tenant box; the cap keeps it to a few MB). Keyed by a
+// content hash; the vector is identical for identical text (per-item path).
 const VEC_CACHE = new Map();
+const VEC_CACHE_MAX = 2000;
 function textHash(s) { return createHash('sha1').update(s).digest('base64'); }
+function cacheSet(k, v) {
+  VEC_CACHE.set(k, v);
+  if (VEC_CACHE.size > VEC_CACHE_MAX) VEC_CACHE.delete(VEC_CACHE.keys().next().value); // FIFO
+}
 
 export async function rankSemantic(question, sessionIds, sessions, { embedder, batchSize = 64 }) {
   if (!embedder) throw new Error('rankSemantic: embedder required (run `silo semantic install`)');
@@ -118,12 +125,14 @@ export async function rankSemantic(question, sessionIds, sessions, { embedder, b
   for (let i = 0; i < texts.length; i++) if (!VEC_CACHE.has(keys[i])) missIdx.push(i);
   if (missIdx.length) {
     const missVecs = await embedder.embed(missIdx.map((i) => texts[i]), 'passage', { batchSize });
-    missIdx.forEach((i, j) => VEC_CACHE.set(keys[i], missVecs[j]));
+    missIdx.forEach((i, j) => cacheSet(keys[i], missVecs[j]));
   }
-  const docVecs = keys.map((k) => VEC_CACHE.get(k));
+  const docVecs = keys.map((k) => VEC_CACHE.get(k) ?? null);
   const [qvec] = await embedder.embed([question], 'query');
   const scored = sessionIds.map((sid, i) => {
-    let dot = 0; const v = docVecs[i];
+    const v = docVecs[i];
+    if (!v) return { sid, sim: -Infinity }; // evicted (only if a haystack > cap); ranks last
+    let dot = 0;
     for (let d = 0; d < qvec.length; d++) dot += qvec[d] * v[d];
     return { sid, sim: dot };
   });
@@ -257,6 +266,11 @@ async function main() {
   const outPath = (args.find((a) => a.startsWith('--out=')) || '').split('=')[1] || null;
   const limitArg = (args.find((a) => a.startsWith('--limit=')) || '').split('=')[1];
   const maxItems = limitArg ? Number.parseInt(limitArg, 10) : Infinity;
+  // Embedding batch size. Larger = faster but bigger ORT activation buffers (and
+  // ORT does not return RSS to the OS) — keep it SMALL on memory-constrained
+  // boxes. Default modest; tune down with --batch=4 on a tight VPS.
+  const batchArg = (args.find((a) => a.startsWith('--batch=')) || '').split('=')[1];
+  const batchSize = batchArg ? Number.parseInt(batchArg, 10) : 16;
 
   // 'all' = single pass: embed each haystack ONCE, score lexical+semantic+hybrid
   // together (hybrid reuses the semantic ranking — no second embed pass). This
@@ -290,7 +304,7 @@ async function main() {
         if (records.has(q.question_id)) return; // already checkpointed
         const gold = deriveGold(q);
         const L = rankLexical(q.question, q.haystack_session_ids, q.haystack_sessions, { queryMode });
-        const S = await rankSemantic(q.question, q.haystack_session_ids, q.haystack_sessions, { embedder });
+        const S = await rankSemantic(q.question, q.haystack_session_ids, q.haystack_sessions, { embedder, batchSize });
         const H = rrf({ L, S }).map((r) => r.key); // fuse FULL lists, then truncate
         const rec = {
           qid: q.question_id, qtype: q.question_type || 'unknown', gold: [...gold],
@@ -324,7 +338,7 @@ async function main() {
   const acc = makeAcc();
   await streamArray(dataPath, async (q) => {
     const gold = deriveGold(q);
-    const top = await rankFor(retriever, q.question, q.haystack_session_ids, q.haystack_sessions, { queryMode, embedder });
+    const top = await rankFor(retriever, q.question, q.haystack_session_ids, q.haystack_sessions, { queryMode, embedder, batchSize });
     scoreRanking(q, top, gold, acc, { emit: !!emitPath });
   }, { maxItems });
 
