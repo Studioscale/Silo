@@ -24,7 +24,8 @@
  * Usage: node eval/longmemeval/run-longmemeval.js <dataset.json> [--retriever=lexical] [--label=NAME] [--emit=path]
  */
 
-import { createReadStream, writeFileSync } from 'node:fs';
+import { createReadStream, writeFileSync, appendFileSync, readFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import MiniSearch from 'minisearch';
 import { normalizeQuery } from '../../src/retrieval/index.js';
 import { rrf } from '../../src/retrieval/fusion.js';
@@ -101,10 +102,25 @@ function sessionUserText(session) {
     .join('\n');
 }
 
-export async function rankSemantic(question, sessionIds, sessions, { embedder }) {
+// Cross-question embedding cache (eval only). LongMemEval haystacks resample a
+// shared session pool, so the same session text recurs across questions — caching
+// by text collapses ~240k _M embeds down to the pool size. Keyed by a content
+// hash; the vector is identical for identical text (deterministic per-item path).
+const VEC_CACHE = new Map();
+function textHash(s) { return createHash('sha1').update(s).digest('base64'); }
+
+export async function rankSemantic(question, sessionIds, sessions, { embedder, batchSize = 64 }) {
   if (!embedder) throw new Error('rankSemantic: embedder required (run `silo semantic install`)');
   const texts = sessions.map(sessionUserText);
-  const docVecs = await embedder.embed(texts, 'passage');
+  const keys = texts.map(textHash);
+  // Embed only the cache misses, in batches; reuse hits.
+  const missIdx = [];
+  for (let i = 0; i < texts.length; i++) if (!VEC_CACHE.has(keys[i])) missIdx.push(i);
+  if (missIdx.length) {
+    const missVecs = await embedder.embed(missIdx.map((i) => texts[i]), 'passage', { batchSize });
+    missIdx.forEach((i, j) => VEC_CACHE.set(keys[i], missVecs[j]));
+  }
+  const docVecs = keys.map((k) => VEC_CACHE.get(k));
   const [qvec] = await embedder.embed([question], 'query');
   const scored = sessionIds.map((sid, i) => {
     let dot = 0; const v = docVecs[i];
@@ -196,10 +212,11 @@ function printSummary(s) {
  * Depth scanner that respects string literals + escapes — handles the 2.74 GB _M
  * file without ever holding a >512 MB string.
  */
-export async function streamArray(path, onObject) {
+export async function streamArray(path, onObject, { maxItems = Infinity } = {}) {
   const stream = createReadStream(path, { encoding: 'utf8', highWaterMark: 1 << 20 });
   let inString = false, escape = false, depth = 0, collecting = false;
   let parts = [];
+  let count = 0;
   for await (const chunk of stream) {
     let sliceStart = collecting ? 0 : -1;
     for (let i = 0; i < chunk.length; i++) {
@@ -220,6 +237,7 @@ export async function streamArray(path, onObject) {
           parts.push(chunk.slice(sliceStart < 0 ? 0 : sliceStart, i + 1));
           await onObject(JSON.parse(parts.join('')));
           parts = []; collecting = false; sliceStart = -1;
+          if (++count >= maxItems) { stream.destroy(); return; } // --limit early stop
         }
       }
     }
@@ -236,11 +254,71 @@ async function main() {
   const retriever = (args.find((a) => a.startsWith('--retriever=')) || '--retriever=lexical').split('=')[1];
   const queryMode = (args.find((a) => a.startsWith('--query=')) || '--query=keywords').split('=')[1];
   const emitPath = (args.find((a) => a.startsWith('--emit=')) || '').split('=')[1] || null;
+  const outPath = (args.find((a) => a.startsWith('--out=')) || '').split('=')[1] || null;
+  const limitArg = (args.find((a) => a.startsWith('--limit=')) || '').split('=')[1];
+  const maxItems = limitArg ? Number.parseInt(limitArg, 10) : Infinity;
 
+  // 'all' = single pass: embed each haystack ONCE, score lexical+semantic+hybrid
+  // together (hybrid reuses the semantic ranking — no second embed pass). This
+  // is the efficient way to get the fusion delta.
+  const reportOnly = args.includes('--report'); // aggregate a resume JSONL, no model needed
+  const wantSemantic = !reportOnly && (retriever === 'semantic' || retriever === 'hybrid' || retriever === 'all');
   let embedder = null;
-  if (retriever === 'semantic' || retriever === 'hybrid') {
+  if (wantSemantic) {
     embedder = await getEmbedder({ siloDir: process.env.SILO_DIR, env: process.env });
     if (!embedder) { console.error(`retriever=${retriever} needs the model — run \`silo semantic install\` + SILO_SEMANTIC=on`); process.exit(2); }
+  }
+
+  if (retriever === 'all') {
+    // RESUMABLE single pass. Each question's gold + top-10 ranked ids per arm are
+    // checkpointed to --resume JSONL as soon as it's scored; a re-run skips
+    // already-done question_ids and appends the rest. This survives the session
+    // restarts that kill long jobs: run repeatedly until coverage is complete,
+    // then --report aggregates the JSONL into the lexical/semantic/hybrid tables.
+    const resumePath = (args.find((a) => a.startsWith('--resume=')) || '').split('=')[1] || null;
+    const records = new Map(); // qid -> { qid, qtype, gold, L, S, H }
+    if (resumePath && existsSync(resumePath)) {
+      for (const line of readFileSync(resumePath, 'utf8').split('\n')) {
+        if (!line.trim()) continue;
+        try { const r = JSON.parse(line); records.set(r.qid, r); } catch { /* skip */ }
+      }
+    }
+
+    if (!reportOnly) {
+      let done = 0;
+      await streamArray(dataPath, async (q) => {
+        if (records.has(q.question_id)) return; // already checkpointed
+        const gold = deriveGold(q);
+        const L = rankLexical(q.question, q.haystack_session_ids, q.haystack_sessions, { queryMode });
+        const S = await rankSemantic(q.question, q.haystack_session_ids, q.haystack_sessions, { embedder });
+        const H = rrf({ L, S }).map((r) => r.key); // fuse FULL lists, then truncate
+        const rec = {
+          qid: q.question_id, qtype: q.question_type || 'unknown', gold: [...gold],
+          L: L.slice(0, 10), S: S.slice(0, 10), H: H.slice(0, 10),
+        };
+        records.set(rec.qid, rec);
+        if (resumePath) appendFileSync(resumePath, JSON.stringify(rec) + '\n');
+        if (++done % 10 === 0) console.error(`… scored ${done} this run (${records.size} total)`);
+      }, { maxItems });
+    }
+
+    // Aggregate ALL checkpointed records (prior + this run).
+    const accs = { lexical: makeAcc(), semantic: makeAcc(), hybrid: makeAcc() };
+    for (const r of records.values()) {
+      const q = { question_id: r.qid, question_type: r.qtype };
+      const gold = new Set(r.gold);
+      scoreRanking(q, r.L, gold, accs.lexical);
+      scoreRanking(q, r.S, gold, accs.semantic);
+      scoreRanking(q, r.H, gold, accs.hybrid);
+    }
+    const summaries = ['lexical', 'semantic', 'hybrid'].map((r) => summarize(accs[r], { label, retriever: r }));
+    for (const s of summaries) { printSummary(s); console.log(''); }
+    const lex5 = summaries[0].headline_recall_all_at_5;
+    const hyb5 = summaries[2].headline_recall_all_at_5;
+    console.log(`COVERAGE: ${records.size} questions checkpointed`);
+    console.log(`FUSION DELTA recall_all@5: hybrid ${hyb5.toFixed(1)}% − lexical ${lex5.toFixed(1)}% = ${(hyb5 - lex5).toFixed(1)} pts`);
+    if (outPath) writeFileSync(outPath, JSON.stringify({ label, coverage: records.size, summaries }, null, 2) + '\n');
+    return;
   }
 
   const acc = makeAcc();
@@ -248,13 +326,15 @@ async function main() {
     const gold = deriveGold(q);
     const top = await rankFor(retriever, q.question, q.haystack_session_ids, q.haystack_sessions, { queryMode, embedder });
     scoreRanking(q, top, gold, acc, { emit: !!emitPath });
-  });
+  }, { maxItems });
 
   if (emitPath) {
     writeFileSync(emitPath, `${acc.emit.map((e) => JSON.stringify(e)).join('\n')}\n`);
     console.log(`emitted ${acc.emit.length} rankings → ${emitPath}`);
   }
-  printSummary(summarize(acc, { label, retriever }));
+  const summary = summarize(acc, { label, retriever });
+  printSummary(summary);
+  if (outPath) writeFileSync(outPath, JSON.stringify({ label, n_limit: maxItems, summaries: [summary] }, null, 2) + '\n');
 }
 
 // Run only when invoked directly (importable for offline tests).

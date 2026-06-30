@@ -217,12 +217,26 @@ export async function getEmbedder({ siloDir, env = process.env, install } = {}) 
       modelRevision: cfg.model_revision,
       dims: cfg.dims,
       config: cfg,
-      async embed(texts, kind = 'passage') {
+      async embed(texts, kind = 'passage', { batchSize = 1 } = {}) {
         const arr = Array.isArray(texts) ? texts : [texts];
+        const prefixed = arr.map((t) => applyPrefix(t, kind, modelKey));
+        // Default batchSize=1 is the DETERMINISTIC path (no padding): each text is
+        // encoded alone, so the cache projection's vectors never depend on batch
+        // composition. batchSize>1 is an opt-in THROUGHPUT path (eval / bulk
+        // rebuilds): padding to the longest item in a batch shifts q8 outputs by
+        // ~1e-2 per component (cosine ≈ 0.999, ranking-equivalent) — fine for
+        // eval, NOT used by the gated cache builder so identity stays stable.
+        if (batchSize > 1) {
+          const out = [];
+          for (let i = 0; i < prefixed.length; i += batchSize) {
+            const res = await pipe(prefixed.slice(i, i + batchSize), { pooling: cfg.pooling, normalize: cfg.normalize });
+            for (const row of res.tolist()) out.push(row);
+          }
+          return out;
+        }
         const out = [];
-        for (const t of arr) {
-          const prefixed = applyPrefix(t, kind, modelKey);
-          const res = await pipe(prefixed, { pooling: cfg.pooling, normalize: cfg.normalize });
+        for (const p of prefixed) {
+          const res = await pipe(p, { pooling: cfg.pooling, normalize: cfg.normalize });
           out.push(Array.from(res.data));
         }
         return out;
