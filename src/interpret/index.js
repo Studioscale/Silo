@@ -40,9 +40,39 @@ export async function interpret(logReader, matrix = null, asOfSeq = Infinity) {
   // can't quietly poison downstream state. interpret() stays total
   // (never throws). Callers that need a hard fail (e.g.
   // `silo regenerate --strict`) check state.skipped for hash_chain_break.
-  let prevHash = GENESIS_HASH;
+  await foldStream(state, logReader.readAll(), { prevHash: GENESIS_HASH, asOfSeq, matrix });
+  finalizeCooldowns(state);
+  return state;
+}
 
-  for await (const { entry, lineNumber, logFile } of logReader.readAll()) {
+/**
+ * Fold an async stream of `{ entry, lineNumber, logFile }` into `state`,
+ * starting the hash chain at `prevHash`. Returns the chain hash after the last
+ * accepted entry (the new `tail_hash`). Pure w.r.t. wall-clock; mutates `state`.
+ *
+ * This is the SINGLE per-entry fold path — shared by the full `interpret()`
+ * (prevHash = GENESIS_HASH over the whole log) and by LogWriter's incremental
+ * admission folds (the sealed prefix, and the active month from the sealed
+ * anchor). Sharing one implementation is what makes the incremental path's
+ * derived write-admissible SET + last_seq identical to a full fold, by
+ * construction — not by parallel re-implementation. (Admission then unions the
+ * sealed + active derives into a combined view; that view's raw topic_content /
+ * topic_index Maps are NOT byte-identical to a full fold's — they carry sentinel
+ * placeholders for sealed slugs — but the derived admissible set and last_seq
+ * that admission actually reads are.)
+ *
+ * Does NOT run finalizeCooldowns(): callers that need the derived
+ * cooldowns_by_normalized_slug view (the full interpret) call it explicitly.
+ * The admission projection does not consult cooldowns, so the incremental
+ * advance skips it.
+ *
+ * @param {Object} state - mutated in place
+ * @param {AsyncIterable<{entry:Object, lineNumber?:number, logFile?:string}>} entryIter
+ * @param {{prevHash?:string, asOfSeq?:number, matrix?:Object}} opts
+ * @returns {Promise<string>} prevHash after the last accepted entry
+ */
+export async function foldStream(state, entryIter, { prevHash = GENESIS_HASH, asOfSeq = Infinity, matrix = null } = {}) {
+  for await (const { entry, lineNumber, logFile } of entryIter) {
     if (entry.seq > asOfSeq) break;
 
     if (!validateEntryShape(entry)) {
@@ -89,6 +119,14 @@ export async function interpret(logReader, matrix = null, asOfSeq = Infinity) {
     prevHash = entryHashed;
   }
 
+  return prevHash;
+}
+
+/**
+ * Phase 2.2 finalization (§4.5). Extracted so foldStream can be reused for the
+ * incremental admission advance without recomputing cooldowns each append.
+ */
+function finalizeCooldowns(state) {
   // Phase 2.2 finalization (§4.5): derive cooldowns_by_normalized_slug from
   // dismissed history. Pure, replay-safe — no wall-clock. Picks the strongest
   // (max-until_ts) UNCLEARED record per normalized slug. Cleared entries are
